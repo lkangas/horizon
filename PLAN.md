@@ -53,8 +53,8 @@ Vaskiluoto 151.7, Hanasaari 151.0, Tahkoluoto 151.0, Salmisaari 150.0, Suomenoja
 
 This tier cannot be derived. Näsinneula, Puijon torni, Pyynikin näkötorni and the Lahti ski jumps
 return nothing within 500–600 m across every MTK tower point class — they are building polygons
-carrying no height. The biggest landmark in Tampere, Kuopio and Lahti is exactly what the registers
-do not give you.
+carrying no height. So in Tampere, Kuopio and Lahti the most prominent structure in the city is
+missing from the registers.
 
 ### Tier 2 — registered structures, labelled when in range
 
@@ -918,14 +918,13 @@ image viewers and single-point elevation helpers. Every real implementation is n
 
 ### 6.1 Shape
 
-**The map and the horizon are the page.** The table is a convenience, not the product: useful on a
-desktop where there is room for it beside everything else, in the way on a phone where it competes
-with the thing you are actually looking at.
+On a phone the map fills the screen; the controls sit behind a hamburger and the table behind a
+button. On a desktop there is room for the panel, the table and the map at once, so the panel stays
+open.
 
-All the regions are views of one piece of state: **the azimuth window** — a centre bearing and a
-span. Scroll the panorama and the window moves; the map's ray sweeps with it and the table, if it is
-open, re-filters to it. Type a bearing and they all jump. Pick an object and the window centres on
-it.
+The regions share one piece of state: a centre bearing and a span. Scrolling the panorama moves it,
+the map's ray sweeps with it, and the table re-filters to it if it is open. Typing a bearing moves
+all of them. Picking an object centres on it.
 
 Desktop — the espoo panel-plus-map split with a strip added:
 
@@ -964,14 +963,12 @@ drawer rather than a child, or it slides off-screen with it. And the sheet's par
 together — moving a 30 px count bar by `translateY(110%)` moves it 33 px and leaves it sitting on
 the map.
 
-Why this works without a compass: the panorama **is** the aiming instrument. You drag it until the
-silhouette on screen matches the one in front of you — two masts and a water tower in the right
-spacing is an unambiguous fingerprint — and then read the bearings off. Matching a shape by eye is
-something people are good at and magnetometers are bad at, especially inside the steel tower where
-this gets used.
+Aiming is done by matching the drawn silhouette against the real one: drag the panorama until two
+masts and a water tower line up at the right spacing, then read the bearings off. That works without
+a compass, and it works inside a steel tower, where a magnetometer does not.
 
-Desktop is not a degraded mobile view. It has the most azimuth visible at once, and it is where you
-plan a trip rather than stand on a tower.
+The desktop layout shows the widest azimuth span, and suits planning rather than standing on a
+tower.
 
 ### 6.2 The table
 
@@ -1011,8 +1008,7 @@ horizon (from 2 m the range to a 40 m tower is 29.6 km; from 3 m, 31.8 km). Snap
 position, then an editable eye height above it: standing (1.7 m), beach, *n*th floor, observation
 deck, or a number. Never the GNSS altitude — §4.3.
 
-**Direction** is user input, and that is the whole interaction: drag the panorama, or type a
-bearing, or tap a row. No sensors are read.
+**Direction** is user input: drag the panorama, type a bearing, or tap a row. No sensors are read.
 
 ### 6.4 Wake lock
 
@@ -1238,8 +1234,8 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
 5. **Islands are azimuth spans, not DEM silhouettes**, except above ~100 m observer height under
    40 km, and on lakes. §3.5.
 
-6. **The map and the horizon are the page; the table is a convenience.** Full screen map on mobile,
-   controls behind a hamburger, table behind a button. §6.1.
+6. **Mobile shows the map full screen**, with the controls behind a hamburger and the table behind
+   a button. Desktop keeps the panel open. §6.1.
 
 7. **No bulk data in the repo**, and no machine specifics in it either — the cache location is
    `AZIMUTH_CACHE`, and `build.py` fails loudly rather than falling back to the repo directory. See
