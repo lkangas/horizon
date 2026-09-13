@@ -75,9 +75,9 @@ Deduplication).
 
 ### Tier 3 — terrain
 
-Named hills (`Kohouma`, MML Nimistö place type 335, 95,520 distinct places, mean marker elevation
-142.6 m), fells, islands (`Saari`, type 350, 56,172 named). Filtered by
-`mittakaavarelevanssiKoodi`, §3.5.
+Named hills (`Kohouma`, MML Nimistö place type **1010210**, 88,233 records, plus `Kohoumaryhmä`
+1010205, 4,414), fells, and islands (`Saari tai luoto` **1010110**, 50,299, plus island groups
+1010105, 5,443). Both filtered by `scaleRelevance`. §3.5 and §3.9.
 
 ### Tier 4 — drawn, not labelled
 
@@ -232,7 +232,12 @@ Positional accuracy from `sijaintitarkkuus` over all 8,422 masts: 5 m on 72.8%, 
 smaller than the observer's own GPS error and below one screen pixel past 10 km. The 40 m tail is
 worth a UI flag.
 
-The shapefile route also works and is the one already used next door: the same five classes out of
+The shapefile route also works for **positions only, and silently loses the third dimension**: in
+the per-sheet SHP mirror the tower layers are shape type `Point`, not `PointZ`, and every
+`nakotorni` / `masto` / `savupiippu` / `vesitorni` record has `KORARV=0.0` and `KORKEUS=0.000`.
+Positions are fine — observed `TASTAR` is 3,000 mm for towers and 5,000 mm for masts, so 0.017° of
+azimuth at 10 km — but ground elevation must come from the GeoPackage, the GML or the OGC API. With
+that caveat, the same five classes come out of
 the per-sheet tiles (`.../2025/shp/L4/L41/L4131R.shp.zip`, ~12 MB a sheet) in 14 Range requests /
 2.66 MB. There the height text has no key and is attached by a distance-capped spatial join on
 identical coordinates — 6 of 12 masts matched in a test sheet, nearest unmatched height text 181 m
@@ -400,8 +405,10 @@ MTK has no island feature class. Finnish islands are the interior rings of the `
 SQLite. The shapefile distribution contains no water polygons, only shoreline polylines, so the
 GeoPackage route avoids polygonisation.
 
-Names from MML Nimistö: 56,172 distinct named islands (`paikkatyyppiKoodi = 350`) out of 812,256
-name rows. The noise filter is already in the data as `mittakaavarelevanssiKoodi`, the smallest map
+Names from MML Nimistö: ~56,000 named islands. The place-type code depends on the distribution —
+`paikkatyyppiKoodi = 350` in the older vocabulary, `placeType 1010110` ("Saari tai luoto", 50,299)
+plus `1010105` (island groups, 5,443) in the current XSD. Same data, two spellings; check which one
+the file in hand uses. The noise filter is already in the data as `mittakaavarelevanssiKoodi`, the smallest map
 scale at which MML intends the name to be drawn:
 
 ```
@@ -588,6 +595,84 @@ Traps:
   towers 33% and lighthouses 61%.
 - Mirrors disagree and fail. Use a mirror list with backoff, cache the response in `raw/`, and query
   the Finland admin area rather than a bbox (§9).
+
+### 3.9 Named hills, fells and lookout towers
+
+MML Nimistö, key-free in bulk as `places_YYYY_MM.zip` from the kapsi mirror — 45.7 MB zipped, 1.16 GB
+of XML, 804,912 records, three snapshots a year. The free MML key is only needed for nightly
+freshness through the OGC API.
+
+**The classification stops at "Kohouma".** There is no place-type code for tunturi, vaara, mäki,
+harju or kukkula; all 88,233 hills are `1010210`, whose own description reads *"tunturi, vaara, mäki,
+harju tms."* The sub-kind is recoverable only from the name's suffix: mäki 27,584, vuori 10,198,
+vaara 9,884, kallio 9,486, kangas 4,718, harju 2,947, selkä 1,197, várri 385, rova 269, oaivi 197,
+kukkula 147, tunturi 140, čohkka 87, kero 82 — and 17,876 (20%) with no recognised suffix.
+
+`placeElevation` is populated on 100% of records and is N2000. Distribution over Kohouma: median
+126 m, p90 250, p99 451, max 1,326. Above thresholds: 16,532 ≥200 m, 4,674 ≥300 m, 592 ≥500 m,
+26 ≥1,000 m. Every Kohouma at or above 500 m lies north of y = 7,400,000.
+
+**It is the DEM value at the name point, not the summit** — measured against the 10 m N2000 model
+over 156 southern hills, median agreement +0.3 m (p10 −1.2, p90 +1.7), and again in the Pallas fells,
+median −0.7 m. That settles the datum question too.
+
+**So the name point needs snapping, but only a little.** Over those 156 southern hills, the DEM
+maximum within 100 m is a median 2.9 m higher than the name point (p90 10.6 m, 62% exceeding 2 m).
+Within 500 m it is 10.0 m higher — but the distance to that maximum has median 357 m and p90 496 m,
+pinned to the search radius, which means the search has walked onto a *neighbouring hill*. Snap
+within 100–150 m, keep both positions, and flag any snap over ~150 m. Make the radius
+relief-dependent: in Lapland the name point is essentially on the summit (median +1.1 m at r=100),
+so the flank problem is a southern, low-relief-forest problem, not a national one.
+
+Two failure modes snapping does not fix:
+
+- **Massif names.** `Bállasduottar / Pallastunturi` (783 m) and `Taivaskero` (806 m) are separate
+  Kohouma 500 m apart; snapping sends both to the same summit and merges the labels. `Koli` is a
+  Kohouma at 169 m with the *highest* notability rank, while the actual summit Ukko-Koli is a
+  separate Kohouma at 341 m with the *lowest*.
+- **Homonyms.** `Halti` resolves to the 1,326 m fell in Enontekiö and to a 66 m hill in another
+  municipality; `Koli` likewise. Scope every name lookup by municipality code or coordinate.
+
+**Use `scaleRelevance` for label filtering before reaching for prominence.** MML's cartographers
+already ranked these: 19 nationally at 1:2M, 70 at 1:1M, 876 at 1:500k, 4,073 at 1:250k, 17,961 at
+1:100k, and the median elevation rises monotonically with rank (110 m → 538 m), so the field encodes
+notability rather than size. The 70 at 1:1M or better are exactly the list a Finn would write: Halti
+1326, Saana 1024, Taivaskero 806, Pallastunturi 783, Ylläs 719, Pyhätunturi 538, Levi 525, Ruka 491,
+Korvatunturi 457, Iso-Syöte 428, Lauhanvuori 222, Koli 169, Orrdals klint 127 (Åland's highest).
+Only four lie south of y = 7,000,000.
+
+Nimistö also carries real Swedish and Sami parallels: over the Kohouma, 6,323 Swedish, 1,672 North
+Sami, 754 Inari Sami, 96 Skolt Sami; some fells carry four names at once.
+
+**Prominence as a second axis, computed but not overdone.** The standard descending-flood union-find
+runs in pure stdlib: measured at 33.5 s and 719 MB for one 2,400×1,200 tile (~250 bytes/cell). That
+does not scale — national coverage at 10 m is 3.4e9 cells, extrapolating to ~11 hours and ~850 GB.
+Max-pool to 50 m instead (1.35e8 cells, ~30 min, ~1.5 GB with array-backed storage): max-pooling
+preserves summit elevations exactly and only raises cols, so it under-estimates prominence by at most
+the intra-cell relief, 1–3 m in Finland. Threshold around 30 m in the south and 100 m in Lapland, and
+flag any component still touching a tile edge as unresolved rather than publishing a zero — on the
+Pallas tile the algorithm correctly left exactly one component open, Taivaskero, whose real ~509 m
+prominence is set by a col hundreds of kilometres away.
+
+Ranking by elevation alone is wrong at the very top: **Halti is Finland's highest point at 1,326 m
+and has about 44 m of prominence**, because the true summit is across the Norwegian border. No
+openly licensed Finnish prominence list exists — OSM carries `prominence=*` on exactly one Finnish
+peak.
+
+OSM is ~12× sparser here and not the base: 6,807 `natural=peak` (41% with `ele`), 282 `natural=hill`.
+79% of OSM peaks have a Nimistö Kohouma within 500 m (median offset 49 m) and where both name the
+place the spelling is byte-identical 94% of the time. `natural=ridge` is a trap — 408 features, `ele`
+on zero of them. Finnish harju ridges come from the 2,947 Kohouma with a `-harju` suffix.
+
+**Lookout towers** are both observation points and targets. MTK class 45000 gives position and ground
+Z (from the GeoPackage or OGC API, never the shapefile mirror — §3.1). OSM adds names: 738
+`tower:type=observation`, but `ele` on 4 and `height` on ~66, so platform elevation has to be
+synthesised from the DEM plus an assumed 15–25 m. About half the OSM entries are *lintutorni* bird
+hides, 5–15 m in flat wetland — legitimate observation points, useless as horizon targets, so filter
+by name substring or `tower:construction`.
+
+MTK class **52210 `korkeuspiste`** (spot height, 3D point) is the authoritative summit-elevation
+source where one exists, and worth preferring over a DEM maximum.
 
 ## 4. Geometry
 
@@ -1152,11 +1237,11 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
 
 ## 12. Open questions
 
-1. **Named hills.** Nimistö's `Kohouma` (type 335) has 95,520 distinct places, but `paikkaKorkeus` is
-   a place-marker elevation, not a summit — for islands it ranges −1,000 to 605 m with 4,390 zeros.
-   The approach is to snap each name to the local DEM maximum within a radius and compute prominence
-   from the 10 m grid, then threshold. The radius, the prominence cutoff, and whether
-   `mittakaavarelevanssiKoodi` alone suffices are unresolved.
+1. **Massif versus summit.** §3.9 identifies the failure — Pallastunturi/Taivaskero, Koli/Ukko-Koli
+   — but not a rule that separates a massif name from a summit name automatically. `scaleRelevance`
+   inverts on the Koli pair, so it cannot be the discriminator. Possibly: a Kohouma whose snapped
+   maximum belongs to another Kohouma is a massif, and should label a span of azimuth rather than a
+   point.
 2. **Water towers filed as buildings.** MML's catalogue says a >500 m² water tower may be stored as a
    building polygon. How many actually are, and whether coordinate-matching `Vesitornin selite`
    (45802) against footprints recovers them, is unmeasured.
