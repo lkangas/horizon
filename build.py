@@ -16,6 +16,7 @@ Fintraffic aviation obstacle register, and OpenStreetMap.
 Bulk data never lands in the repo; see cache_dir().
 """
 
+import calendar
 import csv
 import io
 import json
@@ -513,33 +514,70 @@ def num(v):
     return float(m.group(1)) if m else None
 
 
-def fetch_osm():
+def fetch_osm(max_age_days=45):
+    """Fetch from the first mirror that answers with a FRESH Finland.
+
+    Element count alone is not a sufficient check. The fallback mirrors stay up
+    while serving a months-old planet: on 2026-09-14 both kumi.systems and
+    private.coffee answered happily with a 2026-05-06 snapshot holding 7,764
+    masts against the true 9,529 -- an 18% shortfall that looks like a
+    perfectly healthy response. So gate on timestamp_osm_base, not on size.
+    """
     dest = raw("osm.json")
     if os.path.exists(dest):
-        print("osm.json present, skipping")
-        return
+        with open(dest, encoding="utf-8") as f:
+            age = _osm_age(json.load(f))
+        if age is not None and age <= max_age_days:
+            print("osm.json present and %.0f days old, skipping" % age)
+            return
+        print("osm.json is %s days old, refetching" % ("?" if age is None else "%.0f" % age))
     body = OVERPASS_QL.encode()
+    stale = []
     for url in OVERPASS_MIRRORS:
         host = urllib.parse.urlsplit(url).netloc
         try:
-            print("  trying %s ..." % host, end="", flush=True)
+            print("  %-32s ..." % host, end="", flush=True)
             req = urllib.request.Request(url, data=body, headers=UA)
             with urllib.request.urlopen(req, timeout=900) as r:
                 blob = r.read()
             d = json.loads(blob)
             n = len(d.get("elements", []))
-            # A zero from an area query is a lie, not a count: mirrors holding
-            # a regional extract answer HTTP 200 with a well-formed 0.
+            age = _osm_age(d)
+            # A small count from an area query is a lie, not a count: a mirror
+            # holding a regional extract answers 200 with a well-formed 0.
             if n < 1000:
-                print(" %d elements -- too few, wrong extract?" % n)
+                print(" %d elements -- wrong extract?" % n)
                 continue
-            print(" %d elements" % n)
+            if age is None or age > max_age_days:
+                print(" %d elements but %s days stale" % (n, "?" if age is None else "%.0f" % age))
+                stale.append((age, blob, n, host))
+                continue
+            print(" %d elements, %.0f days old" % (n, age))
             with open(dest, "wb") as f:
                 f.write(blob)
             return
         except Exception as e:
             print(" %s" % type(e).__name__)
+    if stale:
+        stale.sort(key=lambda t: t[0] if t[0] is not None else 1e9)
+        age, blob, n, host = stale[0]
+        sys.exit(
+            "every mirror is stale; freshest is %s at %.0f days (%d elements)." % (host, age, n)
+            + "\nNames and the OSM-only structures would be that far behind."
+            + "\nRetry later, or raise max_age_days deliberately.")
     sys.exit("every Overpass mirror failed; try again later")
+
+
+def _osm_age(d):
+    """Days between the response's planet snapshot and now."""
+    ts = (d.get("osm3s") or {}).get("timestamp_osm_base")
+    if not ts:
+        return None
+    try:
+        t = time.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return (time.time() - calendar.timegm(t)) / 86400.0
 
 
 def load_osm():
@@ -567,7 +605,12 @@ def load_osm():
                        }.get(t.get("tower:type", ""), "obstower")
         if not cat:
             continue
-        h = num(t.get("height")) or num(t.get("height:hub"))
+        h = num(t.get("height"))
+        if h is None and cat == "turbine":
+            # hub height, not tip. Measured over the 53 Finnish turbines
+            # tagged with both, height/height:hub has median 1.429.
+            hub = num(t.get("height:hub"))
+            h = round(hub * 1.43, 1) if hub else None
         out.append({
             "cat": cat, "lat": lat, "lon": lon, "ground_m": None,
             "height_m": h, "src_h": "osm" if h else None,
