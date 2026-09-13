@@ -676,22 +676,42 @@ enter the budget.
 ## 5. Architecture
 
 Same shape as espoo, for the same reasons: `build.py` in pure Python 3 stdlib — no GDAL, no node, no
-database, resumable fetch into `raw/` — plus a self-contained `index.html`. This machine has
-Python 3.14 and git, no node.
+database, resumable fetch — plus a self-contained `index.html`.
+
+**Bulk data does not live in the repo.** Downloads and generated tiles go to a cache directory named
+by `AZIMUTH_CACHE`, defaulting to the platform cache directory. The repo directory holds only text
+and the one small generated file the page fetches:
 
 ```
-azimuth/
-  PLAN.md
-  build.py          # fetch + fuse + derive -> objects.json, terrain tiles
-  index.html        # map + azimuth table + panorama, single file
-  serve.py          # http.server with Range support (from espoo)
-  pmtiles.js        # vendored
-  style.json        # Protomaps grayscale, vendored
-  landmarks.csv     # the tier 1 hand-list, version-controlled
-  objects.json      # generated, gitignored
-  terrain/          # generated int16 tiles, gitignored
-  raw/              # download cache, gitignored
+<repo>                          $AZIMUTH_CACHE
+  PLAN.md                         raw/             download cache, resumable
+  build.py                        terrain/         int16 DEM tiles
+  index.html                      basemap.pmtiles  ~100 MB per region
+  serve.py
+  pmtiles.js                      (not version controlled, and safe to delete —
+  style.json                       build.py re-fetches all of it)
+  landmarks.csv
+  objects.json      generated, <100 KB, gitignored
 ```
+
+Sizes, so the split is justified rather than superstitious: the MTK GeoPackages are read over HTTP
+Range and never land whole, but Turku's CityGML is ~0.75 GB, Ryhti's bulk export 331 MB, and the
+Overpass and nDSM caches a few hundred MB — call `raw/` 1–2 GB. Finland at 10 m as int16 tiles is
+~0.67 GB. A regional z15 basemap is ~106 MB. Two to three gigabytes, all re-downloadable.
+
+The separation matters beyond tidiness: a repo directory can easily sit inside a synced folder, and
+a couple of gigabytes of GML appearing there is a slow, annoying mistake to undo.
+
+`objects.json` stays in the repo directory despite being generated: it is what the page fetches, it
+is under 100 KB gzipped, and it is harmless to sync.
+
+`serve.py` therefore serves two roots. It is espoo's Range-capable handler with `translate_path`
+overridden so `/terrain/…` and `/basemap.pmtiles` resolve into `AZIMUTH_CACHE` and everything else
+into the repo directory. A directory symlink or junction would be less code and is the wrong answer:
+sync clients follow them and copy the target anyway.
+
+`build.py` prints the resolved cache path on startup, and stops if it is unwritable rather than
+falling back to the repo directory.
 
 ### 5.1 build.py
 
@@ -1125,6 +1145,10 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
 
 5. **Islands are azimuth spans, not DEM silhouettes**, except above ~100 m observer height under
    40 km, and on lakes. §3.5.
+
+6. **No bulk data in the repo**, and no machine specifics in it either — the cache location is
+   `AZIMUTH_CACHE`, and `build.py` fails loudly rather than falling back to the repo directory. See
+   CLAUDE.md; the repo is public. §5.
 
 ## 12. Open questions
 
