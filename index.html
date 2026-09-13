@@ -1,0 +1,777 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>azimuth</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.min.css">
+<style>
+  :root {
+    --bg: #f7f6f3;
+    --panel: #fffefb;
+    --line: #ddd8cf;
+    --ink: #2b2723;
+    --dim: #6f6759;
+    --accent: #b4531d;
+    --accent-soft: #f3e3d4;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    display: flex;
+  }
+
+  /* ---------------- panel ---------------- */
+  /* #side is the desktop column. On mobile it becomes display:contents so
+     that #panel and #sheet are laid out against the viewport instead of
+     against each other -- a transformed ancestor is the containing block for
+     its position:fixed descendants, so the drawer would otherwise drag the
+     sheet off-screen with it. */
+  #side {
+    width: 430px;
+    flex: 0 0 430px;
+    background: var(--panel);
+    border-right: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  #panel { display: flex; flex-direction: column; flex: none; min-height: 0; }
+  #sheet { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  #controls { padding: 13px 15px 11px; border-bottom: 1px solid var(--line); }
+  .field { margin-bottom: 11px; }
+  .field:last-child { margin-bottom: 0; }
+  label.cap {
+    display: block;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+    margin-bottom: 5px;
+  }
+  .seg { display: flex; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+  .seg button {
+    flex: 1;
+    padding: 6px 3px;
+    font: inherit;
+    font-size: 12px;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid var(--line);
+    color: var(--dim);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .seg button:last-child { border-right: 0; }
+  .seg button:hover { background: #f4f1eb; }
+  .seg button[aria-pressed="true"] {
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .row { display: flex; align-items: center; gap: 9px; }
+  input[type=range] { flex: 1; accent-color: var(--accent); }
+  .val { font-variant-numeric: tabular-nums; font-size: 12.5px; min-width: 72px; text-align: right; color: var(--dim); }
+  input[type=number], input[type=text] {
+    font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums;
+    border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px;
+    background: var(--panel); color: var(--ink); width: 100%;
+  }
+  input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  .obs { display: grid; grid-template-columns: 1fr 1fr 92px; gap: 7px; }
+  .hint { font-size: 11.5px; color: var(--dim); margin-top: 5px; }
+  .hint b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+
+  #count { font-size: 12px; color: var(--dim); padding: 8px 15px; border-bottom: 1px solid var(--line); }
+  #count b { color: var(--ink); font-variant-numeric: tabular-nums; }
+
+  /* ---------------- list ---------------- */
+  #head, .item {
+    display: grid;
+    grid-template-columns: 22px minmax(78px, 1fr) 58px 52px 44px 44px 50px;
+    gap: 6px;
+    padding: 0 11px;
+    align-items: center;
+  }
+  #head {
+    position: sticky; top: 0; z-index: 1;
+    padding-top: 6px; padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+    font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+    color: var(--dim); background: var(--panel);
+  }
+  #head .n { text-align: right; }
+  #head .sortable { cursor: pointer; }
+  #head .sortable:hover { color: var(--ink); }
+  #head .sortable.on { color: var(--accent); font-weight: 700; }
+
+  #list { overflow-y: auto; flex: 1; min-height: 0; }
+  .item {
+    padding-top: 6px; padding-bottom: 6px;
+    border-bottom: 1px solid #eeeae3;
+    cursor: pointer;
+    font-size: 12.5px;
+  }
+  .item:hover { background: #faf7f2; }
+  .item.sel { background: var(--accent-soft); }
+  .item > div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank { font-size: 11px; color: #a89d8c; font-variant-numeric: tabular-nums; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .item .m { font-weight: 600; }
+  .item .dim { color: var(--dim); }
+  .az { font-weight: 600; }
+  .unnamed { color: var(--dim); font-style: italic; }
+  .flag { color: var(--accent); }
+  #more { padding: 10px 14px; font-size: 12px; color: var(--dim); }
+  #credit { flex: none; padding: 8px 15px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--dim); line-height: 1.5; }
+  #credit a { color: var(--dim); }
+
+  /* ---------------- resizer + map ---------------- */
+  #resizer { flex: 0 0 5px; cursor: col-resize; background: var(--line); }
+  #resizer:hover, #resizer.drag { background: var(--accent); }
+  #map { flex: 1; min-width: 0; position: relative; }
+  .maplibregl-popup-content {
+    font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    padding: 10px 12px; border-radius: 5px;
+  }
+  .pop-name { font-weight: 600; margin-bottom: 6px; }
+  .pop table { border-collapse: collapse; }
+  .pop td { padding: 1px 0; }
+  .pop td:first-child { color: var(--dim); padding-right: 12px; }
+  .pop td:last-child { font-variant-numeric: tabular-nums; text-align: right; }
+  .pop .datum { color: var(--dim); font-size: 11px; margin-top: 6px; }
+  #loading {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--dim); font-size: 13px; z-index: 5;
+  }
+  /* ---------------- mobile ---------------- *
+   * The map is the page. The table is a desktop affordance -- on a phone it
+   * competes with the thing you are actually looking at, so it is gone, not
+   * shrunk. Controls live behind the hamburger.
+   */
+  #burger, #scrim, #listbtn { display: none; }
+  @media (max-width: 820px) {
+    #side { display: contents; }
+    #panel {
+      position: fixed; z-index: 20; top: 0; left: 0; bottom: 0;
+      background: var(--panel);
+      width: min(86vw, 360px); flex: none;
+      border-right: 1px solid var(--line);
+      transform: translateX(-100%);
+      transition: transform 160ms ease-out;
+    }
+    body.menu #panel { transform: none; }
+    #resizer { display: none; }
+    #controls { flex: 1; overflow-y: auto; }
+    #map { flex: 1; }
+
+    /* The table is not the default view on a phone -- the map is -- but it is
+       one tap away, as a sheet over the map. The pill doubles as the count, so
+       it says something useful while closed.
+
+       count and list are wrapped in #sheet and moved together: a percentage
+       translate is relative to the element's own height, so translating a
+       30 px count bar by 110% moves it 33 px and leaves it on the map. */
+    #sheet {
+      display: flex; flex-direction: column;
+      position: fixed; z-index: 18; left: 0; right: 0; bottom: 0; height: 62vh;
+      background: var(--panel); border-top: 1px solid var(--line);
+      transform: translateY(100%);
+      transition: transform 160ms ease-out;
+    }
+    #count { flex: none; }
+    #list { flex: 1; min-height: 0; }
+    body.list #sheet { transform: none; }
+    /* the pill floats over the sheet, so keep the last rows clear of it */
+    body.list #rows { padding-bottom: 46px; }
+    #listbtn {
+      display: block; position: fixed; z-index: 21; left: 10px; bottom: 12px;
+      padding: 8px 13px; font: inherit; font-size: 12.5px;
+      font-variant-numeric: tabular-nums;
+      background: var(--panel); color: var(--ink);
+      border: 1px solid var(--line); border-radius: 5px; cursor: pointer;
+    }
+    body.list #listbtn { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    #credit { display: none; }
+    #burger {
+      display: flex; align-items: center; justify-content: center;
+      position: fixed; z-index: 21; top: 10px; left: 10px;
+      width: 38px; height: 38px; padding: 0;
+      background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+      color: var(--ink); cursor: pointer;
+    }
+    #burger span, #burger span::before, #burger span::after {
+      display: block; width: 17px; height: 1.5px; background: var(--ink); content: "";
+      position: relative;
+    }
+    #burger span::before { top: -5px; position: absolute; }
+    #burger span::after { top: 5px; position: absolute; }
+    body.menu #burger { left: calc(min(86vw, 360px) + 10px); }
+    body.menu #scrim {
+      display: block; position: fixed; inset: 0; z-index: 19;
+      background: rgba(43, 39, 35, 0.22);
+    }
+    /* A tap that lands on the map should pan it, not teleport the observer;
+       moving the pin on a phone is a deliberate drag. */
+  }
+</style>
+</head>
+<body>
+
+<button id="burger" aria-label="Controls" aria-expanded="false"><span></span></button>
+<div id="scrim"></div>
+<button id="listbtn" aria-expanded="false"></button>
+
+<div id="side">
+<div id="panel">
+  <div id="controls">
+    <div class="field">
+      <label class="cap">Observer — drag the pin, or type</label>
+      <div class="obs">
+        <input type="text" id="olat" value="60.15530" title="latitude">
+        <input type="text" id="olon" value="24.95350" title="longitude">
+        <input type="number" id="oeye" value="20" step="1" title="eye height above ground, metres">
+      </div>
+      <div class="hint" id="ghint">&nbsp;</div>
+    </div>
+
+    <div class="field">
+      <label class="cap">Show</label>
+      <div class="seg" id="seg-cat">
+        <button data-v="all" aria-pressed="true">All</button>
+        <button data-v="mast" aria-pressed="false">Masts</button>
+        <button data-v="chimney" aria-pressed="false">Stacks</button>
+        <button data-v="turbine" aria-pressed="false">Turbines</button>
+        <button data-v="tower" aria-pressed="false">Towers</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="cap" for="maxd">Within</label>
+      <div class="row">
+        <input type="range" id="maxd" min="5" max="150" step="5" value="60">
+        <span class="val" id="maxd-val">60 km</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="cap" for="minang">Minimum apparent height</label>
+      <div class="row">
+        <input type="range" id="minang" min="0" max="60" step="1" value="9">
+        <span class="val" id="minang-val">0.15&deg;</span>
+      </div>
+    </div>
+
+    <div class="field">
+      <label class="cap">Only</label>
+      <div class="seg" id="seg-vis">
+        <button data-v="horizon" aria-pressed="true">Above horizon</button>
+        <button data-v="named" aria-pressed="false">Named</button>
+        <button data-v="none" aria-pressed="false">No filter</button>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<div id="sheet">
+  <div id="count">&nbsp;</div>
+  <div id="list">
+    <div id="head">
+      <div>#</div>
+      <div>Object</div>
+      <div class="n sortable on" data-m="az">Az &deg;T</div>
+      <div class="n sortable" data-m="dist">Dist</div>
+      <div class="n sortable" data-m="top">Top</div>
+      <div class="n sortable" data-m="height">H</div>
+      <div class="n sortable" data-m="alt">Alt &deg;</div>
+    </div>
+    <div id="rows"></div>
+  </div>
+</div>
+<div id="credit"></div>
+</div>
+
+<div id="resizer" title="Drag to resize"></div>
+
+<div id="map"><div id="loading">Loading objects&hellip;</div></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.min.js"></script>
+<script>
+/* ------------------------------------------------------------------ *
+ * Geodesy. Azimuth is the whole point of this page, so it is computed
+ * on the ellipsoid: Vincenty inverse on GRS80. The cheaper options are
+ * not good enough -- from Helsinki, a spherical great circle is off by
+ * a systematic 0.048 deg at this latitude, and an equirectangular
+ * approximation by 1.55 deg at 200 km. Measured cost is about half a
+ * microsecond per pair, so 16k objects is ~10 ms.
+ * ------------------------------------------------------------------ */
+const A = 6378137.0, F = 1 / 298.257222101, B = A * (1 - F);
+const D2R = Math.PI / 180, R2D = 180 / Math.PI;
+
+function inverse(lat1, lon1, lat2, lon2) {
+  const L = (lon2 - lon1) * D2R;
+  const U1 = Math.atan((1 - F) * Math.tan(lat1 * D2R));
+  const U2 = Math.atan((1 - F) * Math.tan(lat2 * D2R));
+  const sU1 = Math.sin(U1), cU1 = Math.cos(U1);
+  const sU2 = Math.sin(U2), cU2 = Math.cos(U2);
+  let lam = L, sl, cl, ss, cs, sig, sa, c2a, c2sm, C, prev;
+  for (let i = 0; i < 100; i++) {
+    sl = Math.sin(lam); cl = Math.cos(lam);
+    ss = Math.hypot(cU2 * sl, cU1 * sU2 - sU1 * cU2 * cl);
+    if (ss === 0) return { d: 0, az: 0 };
+    cs = sU1 * sU2 + cU1 * cU2 * cl;
+    sig = Math.atan2(ss, cs);
+    sa = cU1 * cU2 * sl / ss;
+    c2a = 1 - sa * sa;
+    c2sm = c2a !== 0 ? cs - 2 * sU1 * sU2 / c2a : 0;
+    C = F / 16 * c2a * (4 + F * (4 - 3 * c2a));
+    prev = lam;
+    lam = L + (1 - C) * F * sa * (sig + C * ss * (c2sm + C * cs * (-1 + 2 * c2sm * c2sm)));
+    if (Math.abs(lam - prev) < 1e-12) break;
+  }
+  const u2 = c2a * (A * A - B * B) / (B * B);
+  const Ac = 1 + u2 / 16384 * (4096 + u2 * (-768 + u2 * (320 - 175 * u2)));
+  const Bc = u2 / 1024 * (256 + u2 * (-128 + u2 * (74 - 47 * u2)));
+  const dsig = Bc * ss * (c2sm + Bc / 4 * (cs * (-1 + 2 * c2sm * c2sm)
+    - Bc / 6 * c2sm * (-3 + 4 * ss * ss) * (-3 + 4 * c2sm * c2sm)));
+  const az = Math.atan2(cU2 * sl, cU1 * sU2 - sU1 * cU2 * cl) * R2D;
+  return { d: B * Ac * (sig - dsig), az: (az + 360) % 360 };
+}
+
+/* Earth curvature with standard refraction. k = 0.13 gives an effective
+   radius of 7,323 km. Refraction is the dominant term at range: swinging
+   k from 0.07 to 0.25 moves a 100 km object by 291 arcseconds, which is
+   most of a 327 m mast's own angular height at that distance. */
+const K = 0.13, REFF = 6371008.8 / (1 - K);
+
+const fmt = (n, p) => n == null ? '–' : n.toFixed(p == null ? 1 : p);
+
+/* ------------------------------------------------------------------ */
+
+const STATE = {
+  lat: 60.15530, lon: 24.95350, eye: 20,
+  cat: 'all', maxd: 60, minang: 0.15, vis: 'horizon',
+  sort: 'az', sel: null
+};
+const MAX_ROWS = 500;
+let OBJECTS = [], META = {}, view = [], ground = null;
+
+/* Distance is drawn as aerial perspective: near objects in deep rust,
+   far ones fading to pale sand. It is the same ramp the sibling map uses
+   for height, read the other way round, so both pages share a palette. */
+const SHADES = ['#7d2b12', '#b4531d', '#cd7f3c', '#dda866', '#e7c89a', '#efe4d2'];
+const DSTOPS = [0, 8, 20, 40, 80, 150];
+function distColor(km) {
+  for (let i = DSTOPS.length - 1; i >= 0; i--) if (km >= DSTOPS[i]) return SHADES[i];
+  return SHADES[0];
+}
+
+const CATLABEL = {
+  mast: 'mast', chimney: 'stack', turbine: 'turbine', watertower: 'water tower',
+  obstower: 'tower', belltower: 'bell tower', lighthouse: 'lighthouse', building: 'building'
+};
+const TOWERISH = new Set(['obstower', 'watertower', 'belltower', 'lighthouse', 'building']);
+
+const map = new maplibregl.Map({
+  container: 'map',
+  /* A plain raster basemap. The panorama work in the next version wants a
+     self-hosted vector archive; until then this needs no key and no build
+     step, and the tiles carry the same ODbL attribution the data already
+     requires. */
+  style: {
+    version: 8,
+    sources: {
+      osm: {
+        type: 'raster',
+        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
+        tileSize: 256, maxzoom: 19,
+        attribution: '&copy; OpenStreetMap contributors'
+      }
+    },
+    layers: [
+      { id: 'bg', type: 'background', paint: { 'background-color': '#f7f6f3' } },
+      /* Desaturated hard, because the app's own colour has to read on top
+         and a full-colour basemap fights the distance ramp. */
+      { id: 'osm', type: 'raster', source: 'osm',
+        paint: { 'raster-saturation': -0.85, 'raster-contrast': -0.18, 'raster-opacity': 0.75 } }
+    ]
+  },
+  center: [STATE.lon, STATE.lat],
+  zoom: 8.4,
+  maxZoom: 17
+});
+map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
+map.addControl(new maplibregl.ScaleControl({ maxWidth: 110 }));
+new ResizeObserver(() => map.resize()).observe(document.getElementById('map'));
+
+const marker = new maplibregl.Marker({ color: '#b4531d', draggable: true })
+  .setLngLat([STATE.lon, STATE.lat]).addTo(map);
+marker.on('dragend', () => {
+  const p = marker.getLngLat();
+  STATE.lat = p.lat; STATE.lon = p.lng;
+  syncInputs(); recompute();
+});
+
+/* Start the download immediately rather than inside map 'load': a map in a
+   hidden or zero-size container never fires it, which would stall the fetch
+   indefinitely. */
+const dataPromise = fetch('objects.json')
+  .then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); });
+
+dataPromise.then(d => {
+  META = d;
+  OBJECTS = d.objects;
+  const l = document.getElementById('loading');
+  if (l) l.remove();
+  document.getElementById('credit').innerHTML =
+    (d.attribution || []).map(esc).join(' &middot; ') +
+    ' &middot; data ' + esc(d.licence || '') + ', generated ' + esc(d.generated || '');
+  recompute();
+}).catch(() => {
+  const l = document.getElementById('loading');
+  if (l) l.textContent = 'Could not load objects.json — run: python build.py build';
+});
+
+map.on('load', async () => {
+  try { await dataPromise; } catch (e) { return; }
+
+  map.addSource('objs', { type: 'geojson', data: empty() });
+  map.addSource('rings', { type: 'geojson', data: empty() });
+  map.addSource('ray', { type: 'geojson', data: empty() });
+
+  map.addLayer({
+    id: 'rings', type: 'line', source: 'rings',
+    paint: { 'line-color': '#a89d8c', 'line-width': 1, 'line-dasharray': [3, 3], 'line-opacity': 0.7 }
+  });
+  map.addLayer({
+    id: 'ray', type: 'line', source: 'ray',
+    paint: { 'line-color': '#1c1917', 'line-width': 1.6 }
+  });
+  map.addLayer({
+    id: 'objs', type: 'circle', source: 'objs',
+    /* Tallest-apparent on top, so a landmark is never buried under the
+       cluster of turbines in front of it. */
+    layout: { 'circle-sort-key': ['get', 'alt'] },
+    paint: {
+      'circle-color': ['get', 'color'],
+      'circle-radius': ['interpolate', ['linear'], ['get', 'ang'], 0.1, 3, 1, 6, 5, 11],
+      'circle-opacity': 0.9,
+      'circle-stroke-width': ['case', ['get', 'issel'], 2, 0],
+      'circle-stroke-color': '#1c1917'
+    }
+  });
+
+  map.on('click', 'objs', e => select(OBJECTS[e.features[0].properties.i], false));
+  map.on('mouseenter', 'objs', () => map.getCanvas().style.cursor = 'pointer');
+  map.on('mouseleave', 'objs', () => map.getCanvas().style.cursor = '');
+  map.on('click', e => {
+    // Click-to-move is a desktop affordance. On a phone the same gesture is
+    // how you pan, so the pin moves only by a deliberate drag.
+    if (NARROW()) return;
+    if (map.queryRenderedFeatures(e.point, { layers: ['objs'] }).length) return;
+    STATE.lat = e.lngLat.lat; STATE.lon = e.lngLat.lng;
+    marker.setLngLat(e.lngLat); syncInputs(); recompute();
+  });
+
+  paint();
+});
+
+const empty = () => ({ type: 'FeatureCollection', features: [] });
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
+  c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+/* ------------------------------------------------------------------ *
+ * Compute.
+ * ------------------------------------------------------------------ */
+
+function recompute() {
+  if (!OBJECTS.length) return;
+
+  /* Observer ground elevation. There is no terrain model on the client in
+     this version, so it is estimated from the ground elevations the nearby
+     objects already carry -- every one of them was sampled at its own base.
+     Rough, clearly labelled, and free; a real DEM lookup arrives with the
+     panorama. */
+  let near = [], n = 0;
+  for (const o of OBJECTS) {
+    if (o.ground_m == null) continue;
+    const dy = (o.lat - STATE.lat) * 111.32;
+    const dx = (o.lon - STATE.lon) * 111.32 * Math.cos(STATE.lat * D2R);
+    if (dx * dx + dy * dy < 100) near.push(o.ground_m);   // within 10 km
+  }
+  near.sort((a, b) => a - b);
+  ground = near.length ? near[near.length >> 1] : null;
+  const eyeAbs = (ground == null ? 0 : ground) + STATE.eye;
+  document.getElementById('ghint').innerHTML = near.length
+    ? 'ground ≈ <b>' + fmt(ground) + ' m</b> from ' + near.length +
+      ' nearby bases, eye at <b>' + fmt(eyeAbs) + ' m</b> N2000'
+    : 'no nearby reference — eye taken as <b>' + fmt(STATE.eye) + ' m</b> N2000';
+
+  const maxm = STATE.maxd * 1000;
+  const dip = Math.sqrt(2 * Math.max(0.5, STATE.eye) / REFF) * R2D;
+  const out = [];
+  for (let i = 0; i < OBJECTS.length; i++) {
+    const o = OBJECTS[i];
+    // Cheap planar reject first; the ellipsoidal solution is only worth
+    // running for what survives it.
+    const dy = (o.lat - STATE.lat) * 111320;
+    const dx = (o.lon - STATE.lon) * 111320 * Math.cos(STATE.lat * D2R);
+    if (Math.abs(dx) > maxm || Math.abs(dy) > maxm) continue;
+
+    const g = inverse(STATE.lat, STATE.lon, o.lat, o.lon);
+    if (g.d > maxm || g.d < 1) continue;
+
+    o.i = i;
+    o.dist = g.d;
+    o.az = g.az;
+    if (o.top_m != null) {
+      const drop = g.d * g.d / (2 * REFF);
+      o.alt = Math.atan2(o.top_m - eyeAbs - drop, g.d) * R2D;
+      const base = o.ground_m != null ? o.ground_m : o.top_m - (o.height_m || 0);
+      o.altBase = Math.atan2(base - eyeAbs - drop, g.d) * R2D;
+      o.ang = Math.max(0, o.alt - o.altBase);        // visible angular height
+      /* Above the refracted horizon iff the top's apparent elevation clears
+         the horizon dip for this eye height. No terrain is consulted, so this
+         is the geometric horizon only -- a hill or a treeline in the way is
+         not modelled until the panorama arrives. */
+      o.above = o.alt > -dip;
+    } else {
+      o.alt = null; o.altBase = null; o.ang = null; o.above = null;
+    }
+    out.push(o);
+  }
+  view = out.filter(pass);
+  sortView();
+  paint();
+  renderList();
+}
+
+function pass(o) {
+  if (STATE.cat !== 'all') {
+    if (STATE.cat === 'tower' ? !TOWERISH.has(o.cat) : o.cat !== STATE.cat) return false;
+  }
+  if (STATE.vis === 'named' && !o.name) return false;
+  if (STATE.vis === 'horizon' && o.above === false) return false;
+  if (STATE.minang > 0) {
+    if (o.ang == null) return false;
+    if (o.ang < STATE.minang) return false;
+  }
+  return true;
+}
+
+function sortView() {
+  const m = STATE.sort;
+  const key = {
+    az: o => o.az,
+    dist: o => o.dist,
+    top: o => -(o.top_m == null ? -1e9 : o.top_m),
+    height: o => -(o.height_m == null ? -1e9 : o.height_m),
+    alt: o => -(o.alt == null ? -1e9 : o.alt)
+  }[m];
+  view.sort((a, b) => key(a) - key(b));
+}
+
+/* ------------------------------------------------------------------ */
+
+function paint() {
+  if (!map.getSource || !map.getSource('objs')) return;
+  map.getSource('objs').setData({
+    type: 'FeatureCollection',
+    features: view.slice(0, 4000).map(o => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [o.lon, o.lat] },
+      properties: {
+        i: o.i, alt: o.alt == null ? -99 : o.alt, ang: o.ang == null ? 0.1 : o.ang,
+        color: distColor(o.dist / 1000), issel: o.i === STATE.sel
+      }
+    }))
+  });
+  map.getSource('rings').setData({
+    type: 'FeatureCollection',
+    features: [10, 25, 50, 100].filter(km => km <= STATE.maxd)
+      .map(km => ({ type: 'Feature', geometry: { type: 'LineString', coordinates: circle(km) } }))
+  });
+  const s = view.find(o => o.i === STATE.sel);
+  map.getSource('ray').setData(s
+    ? { type: 'FeatureCollection', features: [{ type: 'Feature',
+        geometry: { type: 'LineString', coordinates: [[STATE.lon, STATE.lat], [s.lon, s.lat]] } }] }
+    : empty());
+}
+
+function circle(km) {
+  const pts = [];
+  for (let a = 0; a <= 360; a += 3) {
+    const br = a * D2R, dr = km * 1000 / 6371008.8;
+    const p1 = STATE.lat * D2R, l1 = STATE.lon * D2R;
+    const p2 = Math.asin(Math.sin(p1) * Math.cos(dr) + Math.cos(p1) * Math.sin(dr) * Math.cos(br));
+    const l2 = l1 + Math.atan2(Math.sin(br) * Math.sin(dr) * Math.cos(p1),
+                               Math.cos(dr) - Math.sin(p1) * Math.sin(p2));
+    pts.push([l2 * R2D, p2 * R2D]);
+  }
+  return pts;
+}
+
+function renderList() {
+  updateCount();
+  // On a phone the sheet is usually closed, so skip building 500 rows of DOM
+  // on every slider tick; the button builds them when it opens it.
+  if (NARROW() && !document.body.classList.contains('list')) return;
+  renderRows();
+}
+
+function renderRows() {
+  const rows = view.slice(0, MAX_ROWS);
+  for (const h of document.querySelectorAll('#head .sortable')) {
+    h.classList.toggle('on', h.dataset.m === STATE.sort);
+  }
+  document.getElementById('rows').innerHTML = rows.map((o, i) => {
+    const nm = o.name
+      ? esc(o.name)
+      : '<span class="unnamed">' + CATLABEL[o.cat] + '</span>';
+    const est = o.src_h === 'osm' ? '<span class="flag" title="height from OSM">~</span>' : '';
+    return '<div class="item' + (o.i === STATE.sel ? ' sel' : '') + '" data-i="' + o.i + '"' +
+      ' title="' + esc((o.name || CATLABEL[o.cat]) + ' — ' + o.srcs) + '">' +
+      '<div class="rank">' + (i + 1) + '</div>' +
+      '<div>' + nm + '</div>' +
+      '<div class="num az">' + o.az.toFixed(2) + '</div>' +
+      '<div class="num dim">' + (o.dist / 1000).toFixed(1) + '</div>' +
+      '<div class="num">' + (o.top_m == null ? '–' : Math.round(o.top_m)) + '</div>' +
+      '<div class="num dim">' + (o.height_m == null ? '–' : Math.round(o.height_m)) + est + '</div>' +
+      '<div class="num' + (o.alt == null ? ' dim' : '') + '">' +
+        (o.alt == null ? '–' : (o.alt >= 0 ? '+' : '') + o.alt.toFixed(2)) + '</div>' +
+    '</div>';
+  }).join('');
+
+  if (view.length > MAX_ROWS) {
+    document.getElementById('rows').insertAdjacentHTML('beforeend',
+      '<div id="more">Showing the first ' + MAX_ROWS + ' of ' + view.length.toLocaleString('en') + '.</div>');
+  }
+  for (const el of document.querySelectorAll('#rows .item')) {
+    el.onclick = () => select(OBJECTS[+el.dataset.i], true);
+  }
+}
+
+function updateCount() {
+  const withTop = view.filter(o => o.top_m != null).length;
+  document.getElementById('count').innerHTML =
+    '<b>' + view.length.toLocaleString('en') + '</b> of ' +
+    OBJECTS.length.toLocaleString('en') + ' objects &middot; <b>' + withTop +
+    '</b> with a top elevation';
+  listbtn.textContent = view.length.toLocaleString('en') + ' objects';
+}
+
+function select(o, fly) {
+  if (!o) return;
+  STATE.sel = o.i;
+  paint(); renderList();
+  const g = inverse(STATE.lat, STATE.lon, o.lat, o.lon);
+  new maplibregl.Popup({ offset: 10 })
+    .setLngLat([o.lon, o.lat])
+    .setHTML('<div class="pop"><div class="pop-name">' +
+      (o.name ? esc(o.name) : CATLABEL[o.cat]) + '</div><table>' +
+      tr('True azimuth', g.az.toFixed(3) + '&deg;') +
+      tr('Distance', (g.d / 1000).toFixed(2) + ' km') +
+      tr('Top', o.top_m == null ? '–' : fmt(o.top_m) + ' m') +
+      tr('Height', o.height_m == null ? '–' : fmt(o.height_m) + ' m') +
+      tr('Ground', o.ground_m == null ? '–' : fmt(o.ground_m) + ' m') +
+      tr('Apparent elev.', o.alt == null ? '–' : (o.alt >= 0 ? '+' : '') + o.alt.toFixed(3) + '&deg;') +
+      tr('Angular height', o.ang == null ? '–' : o.ang.toFixed(3) + '&deg;') +
+      '</table><div class="datum">elevations N2000 &middot; source ' + esc(o.srcs) +
+      (o.src_h ? ', height ' + esc(o.src_h) : '') + '</div></div>')
+    .addTo(map);
+  if (fly) map.flyTo({ center: [o.lon, o.lat], speed: 1.2 });
+}
+const tr = (k, v) => '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
+
+/* ------------------------------------------------------------------ *
+ * Controls.
+ * ------------------------------------------------------------------ */
+
+function seg(id, key, cast) {
+  const box = document.getElementById(id);
+  box.onclick = e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    for (const x of box.querySelectorAll('button')) x.setAttribute('aria-pressed', String(x === b));
+    STATE[key] = cast ? cast(b.dataset.v) : b.dataset.v;
+    recompute();
+  };
+}
+seg('seg-cat', 'cat');
+seg('seg-vis', 'vis');
+
+function slider(id, key, fmtv, cast) {
+  const el = document.getElementById(id), out = document.getElementById(id + '-val');
+  const upd = () => {
+    STATE[key] = cast ? cast(+el.value) : +el.value;
+    out.textContent = fmtv(STATE[key]);
+  };
+  el.oninput = () => { upd(); recompute(); };
+  upd();
+}
+slider('maxd', 'maxd', v => v + ' km');
+slider('minang', 'minang', v => v.toFixed(2) + '°', v => v / 60);
+
+function syncInputs() {
+  document.getElementById('olat').value = STATE.lat.toFixed(5);
+  document.getElementById('olon').value = STATE.lon.toFixed(5);
+}
+for (const [id, key] of [['olat', 'lat'], ['olon', 'lon'], ['oeye', 'eye']]) {
+  document.getElementById(id).onchange = e => {
+    const v = parseFloat(e.target.value.replace(',', '.'));
+    if (!isFinite(v)) { syncInputs(); return; }
+    STATE[key] = v;
+    if (key !== 'eye') {
+      marker.setLngLat([STATE.lon, STATE.lat]);
+      map.easeTo({ center: [STATE.lon, STATE.lat] });
+    }
+    recompute();
+  };
+}
+
+document.getElementById('head').onclick = e => {
+  const h = e.target.closest('.sortable');
+  if (!h) return;
+  STATE.sort = h.dataset.m;
+  sortView(); renderList();
+};
+
+/* Hamburger. Mobile only -- on desktop the panel is always there. */
+const NARROW = () => window.matchMedia('(max-width: 820px)').matches;
+const burger = document.getElementById('burger');
+const setMenu = on => {
+  document.body.classList.toggle('menu', on);
+  burger.setAttribute('aria-expanded', String(on));
+};
+burger.onclick = () => setMenu(!document.body.classList.contains('menu'));
+
+const listbtn = document.getElementById('listbtn');
+listbtn.onclick = () => {
+  const on = !document.body.classList.contains('list');
+  document.body.classList.toggle('list', on);
+  listbtn.setAttribute('aria-expanded', String(on));
+  if (on) renderRows();               // built lazily; the sheet is usually shut
+};
+document.getElementById('scrim').onclick = () => setMenu(false);
+window.addEventListener('keydown', e => { if (e.key === 'Escape') setMenu(false); });
+window.addEventListener('resize', () => { if (!NARROW()) setMenu(false); });
+
+/* resizer */
+(function () {
+  const r = document.getElementById('resizer'), p = document.getElementById('side');
+  let on = false;
+  r.onmousedown = e => { on = true; r.classList.add('drag'); e.preventDefault(); };
+  window.onmousemove = e => {
+    if (!on) return;
+    const w = Math.max(320, Math.min(760, e.clientX));
+    p.style.width = w + 'px'; p.style.flexBasis = w + 'px';
+  };
+  window.onmouseup = () => { on = false; r.classList.remove('drag'); };
+})();
+</script>
+</body>
+</html>

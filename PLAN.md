@@ -918,45 +918,51 @@ image viewers and single-point elevation helpers. Every real implementation is n
 
 ### 6.1 Shape
 
-Three regions over one document, and they are all views of a single piece of state: **the azimuth
-window** — a centre bearing and a span. Scroll the panorama and the window moves; the table
-re-filters to it and the map's ray sweeps with it. Type a bearing and all three jump. Tap a row and
-the window centres on that object. There is one control, in three representations.
+**The map and the horizon are the page.** The table is a convenience, not the product: useful on a
+desktop where there is room for it beside everything else, in the way on a phone where it competes
+with the thing you are actually looking at.
 
-Desktop, the espoo panel-plus-map split with a strip added:
+All the regions are views of one piece of state: **the azimuth window** — a centre bearing and a
+span. Scroll the panorama and the window moves; the map's ray sweeps with it and the table, if it is
+open, re-filters to it. Type a bearing and they all jump. Pick an object and the window centres on
+it.
+
+Desktop — the espoo panel-plus-map split with a strip added:
 
 ```
 +----------------+------------------------------------------+
 |  observer      |  P A N O R A M A   ~120 deg visible      |
 |  + filters     |  x = true azimuth, y = elevation angle   |
-|                +------------------------------------------+
-|  AZIMUTH       |                                          |
-|  TABLE         |  M A P   observer pin, azimuth wedge,    |
-|  (window)      |          range rings                     |
+|----------------+------------------------------------------+
+|  azimuth table |                                          |
+|  (the window,  |  M A P   observer pin, azimuth wedge,    |
+|   sortable)    |          range rings                     |
 +----------------+------------------------------------------+
 ```
 
-Mobile, portrait — not tabs, a single scrolling column with a sticky strip:
+Mobile — the map fills the screen, and nothing else is on it by default:
 
 ```
 +---------------------------+
-| 241.8 deg      [type] [G] |  sticky: current bearing, entry, GPS
-+---------------------------+
-| P A N O R A M A           |  sticky, ~35% of viewport height
-| ~45 deg visible, drag L/R |  drag to pan; pinch to widen the span
-+---------------------------+
-| AZIMUTH TABLE             |  scrolls under it, filtered to the
-| rows for the visible      |  visible window, ordered by bearing
-| window only               |
+| [=]                       |  hamburger: observer + filters, as a drawer
 |                           |
-| [ map ]                   |  collapsed by default, expands inline
+|   M A P                   |  full viewport
+|                           |
+|   P A N O R A M A         |  sticky strip, ~35% height
++---------------------------+
+| [ 224 objects ]           |  pill: taps open the table as a sheet
 +---------------------------+
 ```
 
-The panorama stays pinned while the table scrolls beneath it, so the picture and the list are
-always the same azimuths. A phone shows ~45° at a readable label density against the desktop's
-~120°; pinch widens the span and shrinks the labels. Landscape gets ~90° and is the better way to
-use it on a phone, but nothing requires it.
+The controls live behind the hamburger. The table is reachable from the pill in the corner, which
+doubles as the count so it says something useful while shut, and opens the table as a sheet over the
+map. Both are one tap, neither is in the way.
+
+Two layout details that are easy to get wrong and were: a `transform` on the drawer makes it the
+containing block for any `position: fixed` descendant, so the sheet has to be a *sibling* of the
+drawer rather than a child, or it slides off-screen with it. And the sheet's parts must translate
+together — moving a 30 px count bar by `translateY(110%)` moves it 33 px and leaves it sitting on
+the map.
 
 Why this works without a compass: the panorama **is** the aiming instrument. You drag it until the
 silhouette on screen matches the one in front of you — two masts and a water tower in the right
@@ -964,13 +970,14 @@ spacing is an unambiguous fingerprint — and then read the bearings off. Matchi
 something people are good at and magnetometers are bad at, especially inside the steel tower where
 this gets used.
 
-Desktop is not a degraded mobile view. It has the most azimuth visible at once, it is where you plan
-a trip rather than stand on a tower, and it is where espoo's prior art lives.
+Desktop is not a degraded mobile view. It has the most azimuth visible at once, and it is where you
+plan a trip rather than stand on a tower.
 
 ### 6.2 The table
 
-Sortable, filterable, tabular numerals, one row per object — espoo's `#list` idiom. Rows computed
-for an observer on Kaivopuisto hill (60.15530 N, 24.95350 E, eye at 22.3 m):
+A desktop panel, and a sheet behind a button on mobile. Sortable, filterable, tabular numerals, one
+row per object — espoo's `#list` idiom. Rows computed for an observer on Kaivopuisto hill
+(60.15530 N, 24.95350 E, eye at 22.3 m):
 
 ```
 #   OBJECT                    TYPE      AZ °T      DIST     TOP     H     ALT °
@@ -1194,8 +1201,8 @@ roughly a fifth of the work.
 **v1 — the panorama.** Terrain ring streaming, the profile kernel, the canvas strip, occlusion,
 silhouette rectangles, refraction states.
 
-**v2 — mobile.** The sticky-panorama layout, saved viewpoints, wake lock, the install-then-download
-offline flow.
+**v2 — mobile.** The sticky-panorama strip, saved viewpoints, wake lock, the install-then-download
+offline flow. The hamburger drawer and the table sheet already exist.
 
 **v3 — coast and Estonia.** Islands as azimuth spans, Väylävirasto lighthouses and `Reunamerkki`,
 Estonia — leading with Porkkala → Teletorn and Jussarö → Pakri rather than the Helsinki version.
@@ -1231,7 +1238,10 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
 5. **Islands are azimuth spans, not DEM silhouettes**, except above ~100 m observer height under
    40 km, and on lakes. §3.5.
 
-6. **No bulk data in the repo**, and no machine specifics in it either — the cache location is
+6. **The map and the horizon are the page; the table is a convenience.** Full screen map on mobile,
+   controls behind a hamburger, table behind a button. §6.1.
+
+7. **No bulk data in the repo**, and no machine specifics in it either — the cache location is
    `AZIMUTH_CACHE`, and `build.py` fails loudly rather than falling back to the repo directory. See
    CLAUDE.md; the repo is public. §5.
 
