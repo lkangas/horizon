@@ -1188,14 +1188,14 @@ Attribution:
 
 ## 10. Order of work
 
-**v0 — the azimuth table.** `build.py` pulls MTK tower points over Range, fuses AIP heights, samples
+**v0 — objects only, no terrain.** `build.py` pulls MTK tower points over Range, fuses AIP heights, samples
 nDSM for the rest, emits `objects.json`. `index.html` is the espoo page with a different payload:
-map, observer pin, sortable azimuth table. No panorama, no terrain, no sensors. This already answers
-the question — pick a point, get every recognisable object with an exact geodesic bearing — for
-roughly a fifth of the work.
+map, observer pin, horizon strip and a sortable azimuth table. The strip draws objects only: their
+azimuth and elevation are closed-form, so no DEM is needed. What the missing terrain costs is
+occlusion and the land horizon line, both of which arrive with the ray-caster.
 
-**v1 — the panorama.** Terrain ring streaming, the profile kernel, the canvas strip, occlusion,
-silhouette rectangles, refraction states.
+**v1 — terrain.** Ring streaming, the profile kernel, occlusion against the profile, the land
+horizon line under the objects, silhouette rectangles, refraction states.
 
 **v2 — mobile.** The sticky-panorama strip, saved viewpoints, wake lock, the install-then-download
 offline flow. The hamburger drawer and the table sheet already exist.

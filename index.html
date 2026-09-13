@@ -132,6 +132,16 @@
   /* ---------------- resizer + map ---------------- */
   #resizer { flex: 0 0 5px; cursor: col-resize; background: var(--line); }
   #resizer:hover, #resizer.drag { background: var(--accent); }
+  #right { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #pano {
+    flex: 0 0 34%;
+    width: 100%;
+    display: block;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg);
+    touch-action: none;          /* we handle the drag ourselves */
+    cursor: ew-resize;
+  }
   #map { flex: 1; min-width: 0; position: relative; }
   .maplibregl-popup-content {
     font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
@@ -166,7 +176,19 @@
     body.menu #panel { transform: none; }
     #resizer { display: none; }
     #controls { flex: 1; overflow-y: auto; }
-    #map { flex: 1; }
+    #right { flex: 1; min-height: 0; }
+    /* On a phone the strip sits over the bottom of the map rather than
+       stealing a third of it -- the map is what you are navigating. */
+    #pano {
+      position: fixed; z-index: 17; left: 0; right: 0; bottom: 0;
+      /* width:100%, not auto: a canvas is a replaced element, so width:auto
+         resolves to its intrinsic width attribute (300 px) rather than to
+         left:0/right:0, and the strip renders in the corner. */
+      height: 32vh; flex: none; width: 100%;
+      border-top: 1px solid var(--line); border-bottom: 0;
+    }
+    body.list #pano { display: none; }
+    #listbtn { bottom: calc(32vh + 12px); }
 
     /* The table is not the default view on a phone -- the map is -- but it is
        one tap away, as a sheet over the map. The pill doubles as the count, so
@@ -297,7 +319,10 @@
 
 <div id="resizer" title="Drag to resize"></div>
 
-<div id="map"><div id="loading">Loading objects&hellip;</div></div>
+<div id="right">
+  <canvas id="pano"></canvas>
+  <div id="map"><div id="loading">Loading objects&hellip;</div></div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/maplibre-gl/5.24.0/maplibre-gl.min.js"></script>
 <script>
@@ -378,28 +403,13 @@ const TOWERISH = new Set(['obstower', 'watertower', 'belltower', 'lighthouse', '
 
 const map = new maplibregl.Map({
   container: 'map',
-  /* A plain raster basemap. The panorama work in the next version wants a
-     self-hosted vector archive; until then this needs no key and no build
-     step, and the tiles carry the same ODbL attribution the data already
-     requires. */
-  style: {
-    version: 8,
-    sources: {
-      osm: {
-        type: 'raster',
-        tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-        tileSize: 256, maxzoom: 19,
-        attribution: '&copy; OpenStreetMap contributors'
-      }
-    },
-    layers: [
-      { id: 'bg', type: 'background', paint: { 'background-color': '#f7f6f3' } },
-      /* Desaturated hard, because the app's own colour has to read on top
-         and a full-colour basemap fights the distance ramp. */
-      { id: 'osm', type: 'raster', source: 'osm',
-        paint: { 'raster-saturation': -0.85, 'raster-contrast': -0.18, 'raster-opacity': 0.75 } }
-    ]
-  },
+  /* OpenFreeMap's "positron" -- vector, no API key, no usage cap, and already
+     a pale grey, so the app's own colour is the only colour on the page.
+     NOT tile.openstreetmap.org: their tile usage policy forbids an app like
+     this, and in practice the browser gets 0-byte responses while curl gets
+     200, so it fails silently rather than loudly. The self-hosted PMTiles
+     archive in PLAN.md 3.6 replaces this when the terrain work lands. */
+  style: 'https://tiles.openfreemap.org/styles/positron',
   center: [STATE.lon, STATE.lat],
   zoom: 8.4,
   maxZoom: 17
@@ -436,21 +446,57 @@ dataPromise.then(d => {
   if (l) l.textContent = 'Could not load objects.json — run: python build.py build';
 });
 
-map.on('load', async () => {
+/* Set the layers up when the STYLE is parsed, not when the map is fully
+   loaded. 'load' waits for a first complete render, so a basemap that fails
+   to fetch means it never fires and none of the app's own layers are ever
+   added -- the map then sits there empty with no error. */
+let layersReady = false;
+async function addAppLayers() {
+  if (layersReady) return;
+  layersReady = true;
   try { await dataPromise; } catch (e) { return; }
+
+  /* Under the basemap's labels, so place names stay legible on top of the
+     object dots instead of being buried by them. */
+  const firstLabel = (map.getStyle().layers.find(l => l.type === 'symbol') || {}).id;
+
+  /* Positron paints water pale blue. Repaint it, and the water labels, into
+     the warm neutral the rest of the page uses -- the accent should be the
+     only colour on the screen. */
+  for (const l of map.getStyle().layers) {
+    const id = l.id.toLowerCase();
+    if (!/water|ocean|sea|river|lake/.test(id)) continue;
+    try {
+      if (l.type === 'fill') map.setPaintProperty(l.id, 'fill-color', '#e4e0d8');
+      else if (l.type === 'line') map.setPaintProperty(l.id, 'line-color', '#dad5cb');
+      else if (l.type === 'symbol') map.setPaintProperty(l.id, 'text-color', '#9a9083');
+    } catch (e) { /* a style can rename its layers under us; not fatal */ }
+  }
 
   map.addSource('objs', { type: 'geojson', data: empty() });
   map.addSource('rings', { type: 'geojson', data: empty() });
   map.addSource('ray', { type: 'geojson', data: empty() });
+  map.addSource('wedge', { type: 'geojson', data: empty() });
+
+  /* The azimuth window, as a filled wedge. Drawn under everything else so
+     it tints the map rather than hiding it. */
+  map.addLayer({
+    id: 'wedge', type: 'fill', source: 'wedge',
+    paint: { 'fill-color': '#b4531d', 'fill-opacity': 0.09 }
+  }, firstLabel);
+  map.addLayer({
+    id: 'wedge-line', type: 'line', source: 'wedge',
+    paint: { 'line-color': '#b4531d', 'line-width': 1, 'line-opacity': 0.45 }
+  }, firstLabel);
 
   map.addLayer({
     id: 'rings', type: 'line', source: 'rings',
     paint: { 'line-color': '#a89d8c', 'line-width': 1, 'line-dasharray': [3, 3], 'line-opacity': 0.7 }
-  });
+  }, firstLabel);
   map.addLayer({
     id: 'ray', type: 'line', source: 'ray',
     paint: { 'line-color': '#1c1917', 'line-width': 1.6 }
-  });
+  }, firstLabel);
   map.addLayer({
     id: 'objs', type: 'circle', source: 'objs',
     /* Tallest-apparent on top, so a landmark is never buried under the
@@ -463,7 +509,7 @@ map.on('load', async () => {
       'circle-stroke-width': ['case', ['get', 'issel'], 2, 0],
       'circle-stroke-color': '#1c1917'
     }
-  });
+  }, firstLabel);
 
   map.on('click', 'objs', e => select(OBJECTS[e.features[0].properties.i], false));
   map.on('mouseenter', 'objs', () => map.getCanvas().style.cursor = 'pointer');
@@ -478,6 +524,14 @@ map.on('load', async () => {
   });
 
   paint();
+  syncRay();
+}
+
+if (map.isStyleLoaded()) addAppLayers();
+else map.once('styledata', addAppLayers);
+map.on('error', e => {
+  const m = (e && e.error && e.error.message) || '';
+  if (/tile|source/i.test(m)) console.warn('basemap:', m);
 });
 
 const empty = () => ({ type: 'FeatureCollection', features: [] });
@@ -548,6 +602,7 @@ function recompute() {
   sortView();
   paint();
   renderList();
+  drawPano();
 }
 
 function pass(o) {
@@ -667,7 +722,7 @@ function updateCount() {
 function select(o, fly) {
   if (!o) return;
   STATE.sel = o.i;
-  paint(); renderList();
+  paint(); renderList(); drawPano();
   const g = inverse(STATE.lat, STATE.lon, o.lat, o.lon);
   new maplibregl.Popup({ offset: 10 })
     .setLngLat([o.lon, o.lat])
@@ -683,6 +738,8 @@ function select(o, fly) {
       '</table><div class="datum">elevations N2000 &middot; source ' + esc(o.srcs) +
       (o.src_h ? ', height ' + esc(o.src_h) : '') + '</div></div>')
     .addTo(map);
+  PANO.ctr = o.az;
+  syncRay(); drawPano();
   if (fly) map.flyTo({ center: [o.lon, o.lat], speed: 1.2 });
 }
 const tr = (k, v) => '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
@@ -740,6 +797,336 @@ document.getElementById('head').onclick = e => {
   sortView(); renderList();
 };
 
+/* ------------------------------------------------------------------ *
+ * The horizon strip.
+ *
+ * x is true azimuth, y is apparent elevation angle -- the same pair of
+ * axes as an alt-azimuth grid over a sky photograph, so the two can be
+ * compared directly.
+ *
+ * No terrain yet. Every object here is drawn from closed-form geodesy,
+ * which needs no DEM; what the missing terrain costs is occlusion (a
+ * hill or a treeline in front of an object) and the land horizon line.
+ * Both arrive with the ray-caster.
+ * ------------------------------------------------------------------ */
+
+const PANO = {
+  ctr: 0,            // centre azimuth, degrees
+  /* A phone gets a narrower window: 120 degrees across 375 px is about
+     3 px per degree, which is not enough to separate two masts, let alone
+     label them. Widened by hand with a pinch or the wheel. */
+  span: window.matchMedia('(max-width: 820px)').matches ? 45 : 120,
+  spanAuto: true,    // until the user zooms
+  altMin: -2.0,
+  altMax: 7.0,
+  autoAlt: true,
+  hover: null
+};
+
+const cv = document.getElementById('pano');
+const cx2 = cv.getContext('2d');
+
+function panoSize() {
+  const r = cv.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(r.width * dpr) || cv.height !== Math.round(r.height * dpr)) {
+    cv.width = Math.round(r.width * dpr);
+    cv.height = Math.round(r.height * dpr);
+  }
+  return { w: r.width, h: r.height, dpr };
+}
+
+/* Shortest signed angular difference, so the window works across 0/360.
+   Without this a window centred on north silently shows nothing. */
+const dAz = (a, b) => ((a - b + 540) % 360) - 180;
+
+/* Fit the vertical range to the objects in the window. Elevation angles in
+   Finland cluster hard against the horizon -- a fixed -2..+7 range spends
+   nine tenths of the strip on empty sky. */
+function fitAlt() {
+  const half = PANO.span / 2;
+  const alts = [];
+  for (const o of view) {
+    if (o.alt == null) continue;
+    if (Math.abs(dAz(o.az, PANO.ctr)) > half) continue;
+    alts.push(o.alt);
+  }
+  const dip = Math.sqrt(2 * Math.max(0.5, STATE.eye) / REFF) * R2D;
+  if (!alts.length) { PANO.altMin = -Math.max(0.4, dip * 2); PANO.altMax = 1.2; return; }
+  alts.sort((a, b) => a - b);
+  const hi = alts[Math.min(alts.length - 1, Math.floor(alts.length * 0.98))];
+  const lo = alts[0];
+  const pad = Math.max(0.15, (hi - lo) * 0.18);
+  PANO.altMax = Math.max(0.6, hi + pad);
+  PANO.altMin = Math.min(-Math.max(0.25, dip * 1.6), lo - pad * 0.5);
+}
+
+function drawPano() {
+  if (PANO.autoAlt) fitAlt();
+  const { w, h, dpr } = panoSize();
+  cx2.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cx2.clearRect(0, 0, w, h);
+  if (!w || !h) return;
+
+  const half = PANO.span / 2;
+  const X = az => w * (0.5 + dAz(az, PANO.ctr) / PANO.span);
+  const Y = alt => h * (PANO.altMax - alt) / (PANO.altMax - PANO.altMin);
+
+  const RULER = 20;                       // azimuth ruler band at the top
+  const dip = Math.sqrt(2 * Math.max(0.5, STATE.eye) / REFF) * R2D;
+
+  cx2.fillStyle = '#f7f6f3';              // sky is paper, not blue
+  cx2.fillRect(0, 0, w, h);
+
+  /* Ground below the horizon, a shade darker than the sky so the horizon
+     reads without needing a heavy line. */
+  const yH = Y(0);
+  cx2.fillStyle = '#efe9df';
+  cx2.fillRect(0, yH, w, h - yH);
+
+  /* --- elevation grid --- */
+  cx2.strokeStyle = '#e6e0d6';
+  cx2.lineWidth = 1;
+  cx2.fillStyle = '#a89d8c';
+  cx2.font = '10px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  cx2.textAlign = 'left';
+  cx2.textBaseline = 'middle';
+  const rng = PANO.altMax - PANO.altMin;
+  const stepAlt = rng > 24 ? 10 : rng > 12 ? 5 : rng > 5 ? 1 : rng > 2 ? 0.5 : 0.2;
+  for (let k = Math.ceil(PANO.altMin / stepAlt); k * stepAlt <= PANO.altMax; k++) {
+    const a = k * stepAlt;
+    if (Math.abs(a) < 1e-9) continue;
+    const y = Y(a);
+    if (y < RULER) continue;
+    cx2.beginPath(); cx2.moveTo(0, y + 0.5); cx2.lineTo(w, y + 0.5); cx2.stroke();
+    cx2.fillText((a > 0 ? '+' : '') + (stepAlt < 1 ? a.toFixed(1) : a) + '°', 3, y - 6);
+  }
+
+  /* --- the two horizons ---
+     0 deg is the astronomical horizontal. The visible horizon sits below it
+     by the dip, which is 9.8 arcmin from 30 m and worth showing separately:
+     an object between the two lines is above the sea horizon but below
+     level, which is where most of them are. */
+  cx2.strokeStyle = '#c9bfae';
+  cx2.beginPath(); cx2.moveTo(0, yH + 0.5); cx2.lineTo(w, yH + 0.5); cx2.stroke();
+
+  const yD = Y(-dip);
+  if (yD > RULER && yD < h) {
+    cx2.save();
+    cx2.strokeStyle = '#b4531d';
+    cx2.setLineDash([4, 4]);
+    cx2.globalAlpha = 0.5;
+    cx2.beginPath(); cx2.moveTo(0, yD + 0.5); cx2.lineTo(w, yD + 0.5); cx2.stroke();
+    cx2.restore();
+  }
+
+  /* --- objects ---
+     Drawn as a stroke from the base to the top, so the visible part of a
+     distant object is the part above the dashed line. Colour is the same
+     distance ramp the map uses. */
+  const vis = view.filter(o => o.alt != null && Math.abs(dAz(o.az, PANO.ctr)) < half + 1);
+  vis.sort((a, b) => a.dist - b.dist);                 // far behind near
+
+  /* Beyond the horizon distance the Earth cuts the object off: its lowest
+     visible point is where the ray grazes, which is the horizon line at
+     -dip. Nearer than that you can see all the way down to its base, which
+     is well below -dip for anything close. Drawing every object down to its
+     base regardless turns the strip into a picket fence and claims you can
+     see through the planet. */
+  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, STATE.eye));
+  for (const o of vis) {
+    const x = X(o.az);
+    const yt = Y(o.alt);
+    const base = o.dist > dHorizon ? -dip : (o.altBase != null ? o.altBase : 0);
+    const yb = Math.min(Y(base), h);
+    cx2.strokeStyle = distColor(o.dist / 1000);
+    cx2.globalAlpha = o.i === STATE.sel ? 1 : 0.85;
+    cx2.lineWidth = o.i === STATE.sel ? 2.5 : 1.4;
+    cx2.beginPath();
+    cx2.moveTo(x, Math.max(yt, RULER));
+    cx2.lineTo(x, Math.max(yb, RULER));
+    cx2.stroke();
+    // a cap at the top, which is the bit you actually match against a skyline
+    cx2.fillStyle = distColor(o.dist / 1000);
+    cx2.fillRect(x - 1.6, Math.max(yt, RULER) - 1.6, 3.2, 3.2);
+    cx2.globalAlpha = 1;
+  }
+
+  /* --- labels, tallest first, skipped where they would collide --- */
+  cx2.font = '11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  cx2.textBaseline = 'alphabetic';
+  cx2.textAlign = 'left';
+  /* At most three labels per 10 degrees of azimuth, ranked by apparent
+     height with named objects preferred. Without this a 120-degree window
+     over the capital region asks for ~200 labels and renders as a smear. */
+  const bucket = new Map();
+  for (const o of vis) {
+    const k = Math.round(o.az / 10);
+    if (!bucket.has(k)) bucket.set(k, []);
+    bucket.get(k).push(o);
+  }
+  const labelled = [];
+  for (const arr of bucket.values()) {
+    arr.sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || (b.ang || 0) - (a.ang || 0));
+    labelled.push(...arr.slice(0, 3));
+  }
+  labelled.sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || (b.ang || 0) - (a.ang || 0));
+
+  const taken = [];
+  for (const o of labelled) {
+    const txt = o.name || CATLABEL[o.cat];
+    const x = X(o.az), yt = Math.max(Y(o.alt), RULER);
+    const tw = cx2.measureText(txt).width;
+    let y = yt - 7, tries = 0;
+    while (tries < 6 && taken.some(t => !(x + tw + 6 < t.x0 || x - 6 > t.x1) && Math.abs(y - t.y) < 12)) {
+      y -= 12; tries++;
+    }
+    if (y < RULER + 10) continue;                       // no room; leave it unlabelled
+    taken.push({ x0: x - 2, x1: x + tw + 2, y });
+    cx2.fillStyle = o.i === STATE.sel ? '#b4531d' : (o.name ? '#2b2723' : '#8a8072');
+    cx2.fillText(txt, x + 3, y);
+  }
+
+  /* --- azimuth ruler, drawn last so nothing overlaps it --- */
+  cx2.fillStyle = '#fffefb';
+  cx2.fillRect(0, 0, w, RULER);
+  cx2.strokeStyle = '#ddd8cf';
+  cx2.beginPath(); cx2.moveTo(0, RULER + 0.5); cx2.lineTo(w, RULER + 0.5); cx2.stroke();
+
+  const stepAz = PANO.span > 200 ? 30 : PANO.span > 90 ? 10 : PANO.span > 30 ? 5 : 1;
+  const CARD = { 0: 'N', 45: 'NE', 90: 'E', 135: 'SE', 180: 'S', 225: 'SW', 270: 'W', 315: 'NW' };
+  const a0 = Math.ceil((PANO.ctr - half) / stepAz) * stepAz;
+  cx2.textAlign = 'center';
+  cx2.textBaseline = 'middle';
+  for (let a = a0; a <= PANO.ctr + half; a += stepAz) {
+    const az = (a + 720) % 360;
+    const x = X(az);
+    const card = CARD[az];
+    cx2.strokeStyle = card ? '#2b2723' : '#c9bfae';
+    cx2.beginPath();
+    cx2.moveTo(x + 0.5, card ? 2 : RULER - 5);
+    cx2.lineTo(x + 0.5, RULER);
+    cx2.stroke();
+    cx2.fillStyle = card ? '#2b2723' : '#6f6759';
+    cx2.font = (card ? '600 11px ' : '10px ') + '-apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+    cx2.fillText(card || String(az), x, RULER / 2 - 1);
+  }
+
+  /* the azimuth under the pointer, for reading a bearing straight off */
+  if (PANO.hover != null) {
+    const x = X(PANO.hover);
+    cx2.strokeStyle = '#1c1917';
+    cx2.globalAlpha = 0.55;
+    cx2.beginPath(); cx2.moveTo(x + 0.5, RULER); cx2.lineTo(x + 0.5, h); cx2.stroke();
+    cx2.globalAlpha = 1;
+    const s = PANO.hover.toFixed(1) + '°';
+    cx2.font = '600 11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+    const tw = cx2.measureText(s).width;
+    cx2.fillStyle = '#1c1917';
+    cx2.fillRect(x - tw / 2 - 4, h - 18, tw + 8, 15);
+    cx2.fillStyle = '#fffefb';
+    cx2.fillText(s, x, h - 10);
+  }
+}
+
+/* --- interaction: drag to pan, wheel to change the span --- */
+(function () {
+  let drag = null;
+  const azAt = px => {
+    const r = cv.getBoundingClientRect();
+    return (PANO.ctr + (px - r.left - r.width / 2) / r.width * PANO.span + 720) % 360;
+  };
+  cv.addEventListener('pointerdown', e => {
+    drag = { x: e.clientX, ctr: PANO.ctr, moved: 0 };
+    cv.setPointerCapture(e.pointerId);
+  });
+  cv.addEventListener('pointermove', e => {
+    PANO.hover = azAt(e.clientX);
+    if (drag) {
+      const r = cv.getBoundingClientRect();
+      const d = (e.clientX - drag.x) / r.width * PANO.span;
+      drag.moved = Math.max(drag.moved, Math.abs(e.clientX - drag.x));
+      PANO.ctr = (drag.ctr - d + 720) % 360;
+      syncRay();
+    }
+    drawPano();
+  });
+  cv.addEventListener('pointerleave', () => { PANO.hover = null; drawPano(); });
+  cv.addEventListener('pointerup', e => {
+    const wasDrag = drag && drag.moved > 4;
+    drag = null;
+    if (wasDrag) return;
+    // a tap picks the nearest object in the window
+    const az = azAt(e.clientX);
+    let best = null, bd = 1e9;
+    for (const o of view) {
+      if (o.alt == null) continue;
+      const d = Math.abs(dAz(o.az, az));
+      if (d < bd) { bd = d; best = o; }
+    }
+    if (best && bd < PANO.span * 0.03) select(best, false);
+  });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    if (e.shiftKey) {                       // vertical zoom, and stop auto-fitting
+      PANO.autoAlt = false;
+      const c = (PANO.altMax + PANO.altMin) / 2, r = (PANO.altMax - PANO.altMin) / 2;
+      const k = e.deltaY > 0 ? 1.12 : 1 / 1.12;
+      PANO.altMax = c + r * k; PANO.altMin = c - r * k;
+    } else {
+      PANO.span = Math.max(5, Math.min(360, PANO.span * (e.deltaY > 0 ? 1.12 : 1 / 1.12)));
+      PANO.spanAuto = false;
+    }
+    drawPano();
+  }, { passive: false });
+  cv.addEventListener('dblclick', () => { PANO.autoAlt = true; drawPano(); });
+
+  /* Pinch, for the phone. Two pointers on the strip scale the azimuth span
+     about its centre. */
+  const pts = new Map();
+  let pinch0 = null;
+  cv.addEventListener('pointerdown', e => pts.set(e.pointerId, e.clientX));
+  cv.addEventListener('pointermove', e => {
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, e.clientX);
+    if (pts.size === 2) {
+      const [a, b] = [...pts.values()];
+      const d = Math.abs(a - b);
+      if (pinch0 == null) { pinch0 = { d, span: PANO.span }; return; }
+      if (d > 10) {
+        PANO.span = Math.max(5, Math.min(360, pinch0.span * pinch0.d / d));
+        PANO.spanAuto = false;
+        syncRay(); drawPano();
+      }
+    }
+  });
+  const clear = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch0 = null; };
+  cv.addEventListener('pointerup', clear);
+  cv.addEventListener('pointercancel', clear);
+  new ResizeObserver(drawPano).observe(cv);
+})();
+
+/* The map's wedge follows the panorama window, so the two always agree
+   about which way you are looking. */
+function syncRay() {
+  if (!map.getSource || !map.getSource('wedge')) return;
+  const pts = [[STATE.lon, STATE.lat]];
+  const R = 6371008.8, km = Math.min(STATE.maxd, 150) * 1000;
+  for (let a = -PANO.span / 2; a <= PANO.span / 2; a += Math.max(1, PANO.span / 60)) {
+    const br = (PANO.ctr + a) * D2R, dr = km / R;
+    const p1 = STATE.lat * D2R, l1 = STATE.lon * D2R;
+    const p2 = Math.asin(Math.sin(p1) * Math.cos(dr) + Math.cos(p1) * Math.sin(dr) * Math.cos(br));
+    const l2 = l1 + Math.atan2(Math.sin(br) * Math.sin(dr) * Math.cos(p1),
+                               Math.cos(dr) - Math.sin(p1) * Math.sin(p2));
+    pts.push([l2 * R2D, p2 * R2D]);
+  }
+  pts.push([STATE.lon, STATE.lat]);
+  map.getSource('wedge').setData({
+    type: 'Feature', geometry: { type: 'Polygon', coordinates: [pts] }
+  });
+}
+
+
 /* Hamburger. Mobile only -- on desktop the panel is always there. */
 const NARROW = () => window.matchMedia('(max-width: 820px)').matches;
 const burger = document.getElementById('burger');
@@ -758,7 +1145,10 @@ listbtn.onclick = () => {
 };
 document.getElementById('scrim').onclick = () => setMenu(false);
 window.addEventListener('keydown', e => { if (e.key === 'Escape') setMenu(false); });
-window.addEventListener('resize', () => { if (!NARROW()) setMenu(false); });
+window.addEventListener('resize', () => {
+  if (!NARROW()) setMenu(false);
+  if (PANO.spanAuto) { PANO.span = NARROW() ? 45 : 120; syncRay(); drawPano(); }
+});
 
 /* resizer */
 (function () {
