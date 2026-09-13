@@ -1,0 +1,6 @@
+raw/
+terrain/
+objects.json
+basemap.pmtiles
+__pycache__/
+*.pyc
