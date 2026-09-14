@@ -1213,10 +1213,36 @@ guessed from the median base elevation of nearby objects rather than looked up.
 geolocation and HTTPS for a phone are done. Saved viewpoints, wake lock and the
 install-then-download offline flow are not.
 
-**v3 — coast, hills and Estonia.** *(not started)* Named hills from Nimistö (§3.9), islands as
-azimuth spans (§3.5), Väylävirasto lighthouses and `Reunamerkki` — the 163 lighthouses currently in
-the catalogue are OSM-only, with 130 heights and no focal planes — and Estonia, leading with
-Porkkala → Teletorn and Jussarö → Pakri rather than the Helsinki version.
+**v3 — coast, hills and Estonia.** *(not started)* These three have very different dependencies on
+v1, and should not be sequenced as one block:
+
+- **Lighthouses and sea marks are independent of terrain.** They are point objects exactly like
+  masts — Väylävirasto gives a surveyed position and a focal height — so nothing about them waits
+  on the ray-caster. The 163 lighthouses in the catalogue today are OSM-only with no focal planes,
+  against ~280 surveyed ones available. This could be done at any time.
+- **Islands are mostly independent.** §3.5 concluded they should be drawn as azimuth spans clipped
+  at the horizon rather than as DEM silhouettes, because curvature hides most of an island: from a
+  30 m observer at 40 km, 24.7 m of every island is below the horizon. What they need is coastline
+  geometry and names, not a profile. Terrain only helps for near islands seen from high up.
+- **Hills genuinely depend on terrain.** A hill is not a point object, and drawing one as a vertical
+  stroke like a mast would be actively wrong — Koli is a shape, not a stick. With a terrain profile,
+  hills are already *in* the silhouette and Nimistö's contribution is to put names on features the
+  ray-caster has drawn. Doing hills before v1 would mean inventing a representation that v1 then
+  throws away.
+
+Estonia is a data addition on top of whichever of the above it rides with.
+
+**Duplicates in the catalogue.** Measured on the current build: 113 same-category pairs within 5 m
+of each other, 163 within 15 m, 267 within 30 m — 2.4% of objects involved at 30 m. The cause is
+the height-compatibility veto in the merge. It refuses to merge two records whose heights disagree
+by more than max(10 m, 15%), which is right at 100–300 m separation, where a site really can hold
+an old and a new mast — but wrong at 1–5 m, where the two records are plainly the same object and
+it is the heights that are wrong. Two signatures dominate: a mast at 1.1 m separation with OSM
+saying 360 m and MTK 36 m, a factor-of-ten tagging error; and turbines at 2–6 m separation with the
+register giving 211 m tip height against OSM's 144 m hub height. The fix is to make the veto
+distance-dependent — merge unconditionally below ~15 m and record the conflict rather than
+duplicating the object — and to reconsider the never-self-merge rule for MTK, which produces 27 of
+the 15 m pairs and was written to protect power stations whose stacks are ~100 m apart, not 15.
 
 **Also outstanding, not tied to a phase.** Names: only 1,429 of 20,834 objects have one, and the
 rest fall back to the category word. Wikidata is CC0 and would cleanly name a few hundred
