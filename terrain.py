@@ -179,6 +179,7 @@ import math
 import os
 import struct
 import sys
+import threading
 import time
 import zlib
 from array import array
@@ -504,6 +505,76 @@ def fetch_terrain(lat, lon, rings=RINGS, workers=6, verbose=True):
     return write_index(rings, report)
 
 
+def tiles_over(cell_m, bbox=CUBE):
+    """Every tile of this cell size whose square meets `bbox`.
+
+    The national counterpart of tiles_for. There is no observer to measure
+    from, so there is no disc test and no inner ring: at this size the grid
+    IS the selection.
+    """
+    s = float(tile_step(cell_m))
+    tx0 = int(math.floor((bbox[0] - GRID_E0) / s))
+    tx1 = int(math.floor((bbox[2] - GRID_E0 - 1) / s))
+    ty0 = int(math.floor((GRID_N0 - bbox[3]) / s))
+    ty1 = int(math.floor((GRID_N0 - bbox[1] - 1) / s))
+    return [(tx, ty) for ty in range(ty0, ty1 + 1)
+            for tx in range(tx0, tx1 + 1)]
+
+
+def fetch_nationwide(bbox=CUBE, cells=None, workers=8, verbose=True):
+    """Every tile in the country, at every cell size the rings use.
+
+    fetch_terrain covers a disc around one observer, which is the wrong shape
+    for a hosted deployment: the observer can be anywhere, so the tiles cannot
+    be generated around places chosen in advance.
+
+    Two properties of _build_tile make this affordable. It writes nothing for
+    an all-nodata square, so open sea and the far side of the border cost a
+    request and no disk; and it never refetches a tile that exists, so the run
+    is resumable and a second pass over a warm cache is free.
+
+    The whole GeoCubes window is 47,505 tiles across the four sizes and about
+    2.3 GB if every one of them held land. Finland is roughly 40% of that
+    window, so the real figure is nearer 19,000 tiles and 0.9 GB -- but every
+    one of the 47,505 has to be ASKED for, because nodata is only discoverable
+    by fetching. That, not the writing, is what sets the runtime.
+    """
+    os.makedirs(TERRAIN, exist_ok=True)
+    cells = cells or sorted(TILE_PX)
+    report = []
+    for cell_m in cells:
+        want = tiles_over(cell_m, bbox)
+        t0 = time.time()
+        ship = fetched = 0
+        wrote = 0
+        done = [0]
+        lock = threading.Lock()
+
+        def one(t):
+            s_, f_ = _build_tile(cell_m, t[0], t[1])
+            with lock:
+                done[0] += 1
+                if verbose and done[0] % 500 == 0:
+                    print("    %d m  %d / %d  %.2f GB"
+                          % (cell_m, done[0], len(want), ship / 1e9), flush=True)
+            return s_, f_
+
+        with futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            for s_, f_ in ex.map(one, want):
+                ship += s_
+                fetched += f_
+                if s_:
+                    wrote += 1
+        report.append(dict(cell_m=cell_m, outer_km=None, tiles=len(want),
+                           written=wrote, shipped=ship, fetched=fetched,
+                           secs=time.time() - t0))
+        if verbose:
+            print("  %4d m  %6d asked  %6d written  %8.2f GB shipped  %6.0f s"
+                  % (cell_m, len(want), wrote, ship / 1e9,
+                     report[-1]["secs"]), flush=True)
+    return write_index(RINGS, report)
+
+
 def write_index(rings=RINGS, report=None):
     """Rebuild terrain/index.json from what is actually on disk."""
     tiles = {}
@@ -730,6 +801,10 @@ def main():
     ap.add_argument("--rings", type=int, default=len(RINGS),
                     help="how many rings, innermost first")
     ap.add_argument("--workers", type=int, default=6)
+    ap.add_argument("--nationwide", action="store_true",
+                    help="every tile in the country, not a disc around --lat/--lon")
+    ap.add_argument("--cells", type=int, nargs="+",
+                    help="restrict --nationwide to these cell sizes, metres")
     ap.add_argument("--ground", nargs=2, type=float, metavar=("LAT", "LON"),
                     help="just print ground_at() three ways and stop")
     a = ap.parse_args()
@@ -744,6 +819,25 @@ def main():
                 print("  %-7s failed: %s" % (s, exc))
                 continue
             print("  %-7s %8s m  %.3f s" % (s, v, time.time() - t0))
+        return
+
+    if a.nationwide:
+        cells = a.cells or sorted(TILE_PX)
+        want = sum(len(tiles_over(c)) for c in cells)
+        print("nationwide terrain -> %s" % TERRAIN)
+        print("cell sizes: %s" % ", ".join("%d m" % c for c in cells))
+        print("%d tiles to ask for; the ones that are all nodata are not written"
+              % want)
+        t0 = time.time()
+        idx = fetch_nationwide(cells=cells, workers=a.workers)
+        r = idx["last_fetch"]
+        print("  %-6s %6d asked  %6d written  %8.2f GB shipped  %6.0f s"
+              % ("total", sum(x["tiles"] for x in r),
+                 sum(x["written"] for x in r),
+                 sum(x["shipped"] for x in r) / 1e9, time.time() - t0))
+        print("index: %s (%d bytes, %d tiles cached)"
+              % (INDEX, os.path.getsize(INDEX),
+                 sum(len(v) for v in idx["tiles"].values())))
         return
 
     rings = RINGS[:a.rings]
