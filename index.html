@@ -133,12 +133,27 @@
   #resizer { flex: 0 0 5px; cursor: col-resize; background: var(--line); }
   #resizer:hover, #resizer.drag { background: var(--accent); }
   #right { flex: 1; min-width: 0; display: flex; flex-direction: column; }
-  #pano {
+  /* The wrapper owns the layout; the canvas is taken out of flow inside it.
+     A canvas is a replaced element, so its width/height ATTRIBUTES are its
+     intrinsic size, and a flex item defaults to min-height:auto -- meaning the
+     bitmap size becomes a layout floor. Sizing the bitmap from
+     devicePixelRatio then grew the element, which fired the ResizeObserver,
+     which redrew and grew it again: the strip crept down over the map and the
+     map flickered as it was resized every frame. Absolute positioning breaks
+     the cycle for good. */
+  #panobox {
     flex: 0 0 34%;
-    width: 100%;
-    display: block;
+    position: relative;
+    min-height: 0;
     border-bottom: 1px solid var(--line);
     background: var(--bg);
+  }
+  #pano {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
     touch-action: none;          /* we handle the drag ourselves */
     cursor: ew-resize;
   }
@@ -179,15 +194,12 @@
     #right { flex: 1; min-height: 0; }
     /* On a phone the strip sits over the bottom of the map rather than
        stealing a third of it -- the map is what you are navigating. */
-    #pano {
+    #panobox {
       position: fixed; z-index: 17; left: 0; right: 0; bottom: 0;
-      /* width:100%, not auto: a canvas is a replaced element, so width:auto
-         resolves to its intrinsic width attribute (300 px) rather than to
-         left:0/right:0, and the strip renders in the corner. */
-      height: 32vh; flex: none; width: 100%;
+      height: 32vh; flex: none;
       border-top: 1px solid var(--line); border-bottom: 0;
     }
-    body.list #pano { display: none; }
+    body.list #panobox { display: none; }
     #listbtn { bottom: calc(32vh + 12px); }
 
     /* The table is not the default view on a phone -- the map is -- but it is
@@ -320,7 +332,7 @@
 <div id="resizer" title="Drag to resize"></div>
 
 <div id="right">
-  <canvas id="pano"></canvas>
+  <div id="panobox"><canvas id="pano"></canvas></div>
   <div id="map"><div id="loading">Loading objects&hellip;</div></div>
 </div>
 
@@ -1103,7 +1115,15 @@ function drawPano() {
   const clear = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch0 = null; };
   cv.addEventListener('pointerup', clear);
   cv.addEventListener('pointercancel', clear);
-  new ResizeObserver(drawPano).observe(cv);
+  /* Observe the WRAPPER, never the canvas: observing an element whose size
+     you set inside the callback is how you build a resize loop. The guard is
+     belt and braces. */
+  let redrawing = false;
+  new ResizeObserver(() => {
+    if (redrawing) return;
+    redrawing = true;
+    requestAnimationFrame(() => { redrawing = false; drawPano(); });
+  }).observe(document.getElementById('panobox'));
 })();
 
 /* The map's wedge follows the panorama window, so the two always agree
