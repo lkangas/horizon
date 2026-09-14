@@ -270,9 +270,8 @@ async function sweep(msg) {
      This is terrain.py's ground_at(source="auto") done client-side: the same
      nearest-cell read of the same tiles. Checked against the Python at the
      page's default pin (8.00 m both ways) and on the Tiirismaa slope
-     (154.00 m both ways), against a median-of-nearby-object-bases guess of
-     10.5 m at the first of those. */
-  let ground = null, groundSrc = null;
+     (154.00 m both ways). */
+  let tileGround = null;
   for (const cell of [10, 20, 50, 100]) {
     if (!px[cell]) continue;
     const step = cell * px[cell];
@@ -283,11 +282,19 @@ async function sweep(msg) {
     const col = Math.floor((e0 - t.oe) / t.cell), row = Math.floor((t.on - n0) / t.cell);
     if (col < 0 || col >= t.w || row < 0 || row >= t.h) continue;
     const v = t.v[row * t.w + col];
-    if (v === NODATA) { ground = 0; groundSrc = cell + ' m tile, no data (sea)'; break; }
-    ground = v / (t.scale || 1);
-    groundSrc = cell + ' m terrain tile';
+    if (v === NODATA) { tileGround = 0; break; }   // no data here is sea
+    tileGround = v / (t.scale || 1);
     break;
   }
+
+  /* msg.ground, when the page sends it, is a ground elevation the user typed
+     for this position, and it replaces the tile reading as the observer's
+     own. It has to: the page computes every object's geometry from the same
+     number, and a sweep run from a different one would draw a skyline that
+     disagrees with the objects standing in front of it. Absent, this is the
+     path that has always run. The tile reading is reported either way, so the
+     page can show it again the moment the override is cleared. */
+  const ground = msg.ground != null ? msg.ground : tileGround;
   if (ground == null) throw new Error('no terrain tile covers the observer');
 
   const hobs = ground + msg.eye;
@@ -481,7 +488,7 @@ async function sweep(msg) {
   const stD = sD.slice(0, np), stA = sA.slice(0, np);
   self.postMessage({
     id: msg.id, ok: true,
-    ground: ground, groundSrc: groundSrc, hobs: hobs,
+    ground: tileGround, hobs: hobs,
     dip: -Math.atan(dipTan) * R2D,
     prof: prof, profD: profD, off: off, stD: stD, stA: stA,
     stats: {

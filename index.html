@@ -90,7 +90,26 @@
   .btn:hover { background: #f4f1eb; }
   .btn[aria-busy="true"] { color: var(--dim); }
   .btn.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-  .obs { display: grid; grid-template-columns: 1fr 1fr 92px; gap: 7px; }
+  /* Latitude, longitude, and the locate button, which is square so the row
+     reads as two coordinate boxes and one control. */
+  .obs { display: grid; grid-template-columns: 1fr 1fr auto; gap: 7px; }
+  /* DEM and AGL: a narrow label in front of each box, the two boxes sharing
+     what is left of the width equally. */
+  .obs2 {
+    display: grid; grid-template-columns: auto 1fr auto 1fr;
+    gap: 7px; align-items: center; margin-top: 7px;
+  }
+  .obs2 label { font-size: 12px; color: var(--dim); }
+  .iconbtn {
+    display: flex; align-items: center; justify-content: center;
+    width: 30px; padding: 0; color: var(--dim);
+  }
+  .iconbtn:hover { color: var(--ink); }
+  .iconbtn.on { background: var(--accent-soft); color: var(--accent); }
+  /* The centre dot means the pin is standing on a position fix. The ring is
+     the control; the dot is whether it is in use. */
+  .iconbtn .fix { display: none; }
+  .iconbtn.on .fix { display: block; }
   .hint { font-size: 11.5px; color: var(--dim); margin-top: 5px; }
   /* A two-thumb range. Native <input type=range> has one thumb, and the usual
      trick of stacking two and fighting ::-webkit-slider-thumb pointer-events
@@ -295,17 +314,27 @@
 <div id="panel">
   <div id="controls">
     <div class="field">
-      <label class="cap">Observer — drag the pin, or type</label>
       <div class="obs">
         <input type="text" id="olat" value="60.15530" title="latitude">
         <input type="text" id="olon" value="24.95350" title="longitude">
-        <input type="number" id="oeye" value="20" step="1" title="eye height above ground, metres">
+        <button id="locate" class="btn iconbtn" aria-label="Use my location"
+                aria-pressed="false" title="Use my location">
+          <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"
+               fill="none" stroke="currentColor" stroke-width="1.7">
+            <circle cx="12" cy="12" r="6.4"/>
+            <path d="M12 1.6v4M12 18.4v4M1.6 12h4M18.4 12h4" stroke-linecap="round"/>
+            <circle class="fix" cx="12" cy="12" r="2.5" fill="currentColor" stroke="none"/>
+          </svg>
+        </button>
       </div>
-      <div class="row" style="margin-top:7px">
-        <button id="locate" class="btn">Use my location</button>
-        <span class="val" id="acc" style="min-width:0;flex:1;text-align:left">&nbsp;</span>
+      <div class="obs2">
+        <label for="odem">DEM:</label>
+        <input type="number" id="odem" value="0" step="1"
+               title="ground elevation under the observer, metres N2000">
+        <label for="oagl">AGL:</label>
+        <input type="number" id="oagl" value="20" step="1"
+               title="eye height above that ground, metres">
       </div>
-      <div class="hint" id="ghint">&nbsp;</div>
     </div>
 
     <div class="field">
@@ -450,13 +479,19 @@ const fmt = (n, p) => n == null ? '–' : n.toFixed(p == null ? 1 : p);
 
 /* ------------------------------------------------------------------ */
 
+/* eye is AGL: the eye's height above the ground it stands on, never above
+   sea level. The AGL box edits it directly.
+   dem is a ground elevation the user typed, in metres N2000, and demAt the
+   position it was typed at -- an elevation belongs to a place, so moving the
+   pin retires it. fixAt is the position geolocation last reported, which is
+   how the locate button knows whether its fix is still the one in use. */
 const STATE = {
-  lat: 60.15530, lon: 24.95350, eye: 20,
+  lat: 60.15530, lon: 24.95350, eye: 20, dem: null, demAt: null, fixAt: null,
   cat: 'all', mind: 0, maxd: 60, minang: 0.15, vis: 'horizon',
   sort: 'az', sel: null
 };
 const MAX_ROWS = 500;
-let OBJECTS = [], META = {}, view = [], ground = null;
+let OBJECTS = [], META = {}, view = [];
 
 /* Distance is drawn as aerial perspective: near objects in deep rust,
    far ones fading to pale sand. It is the same ramp the sibling map uses
@@ -641,13 +676,49 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
 const HZ = {
   worker: null, err: null, failed: null,
   key: null, posKey: null, pending: null, fetching: null, t0: 0, wall: 0,
-  ground: null, groundSrc: null,
+  ground: null,
   prof: null, profD: null, off: null, stD: null, stA: null,
   stats: null, hidden: 0
 };
 
 const hzPos = () => STATE.lat.toFixed(6) + '/' + STATE.lon.toFixed(6);
-const hzKey = () => hzPos() + '/' + STATE.eye;
+/* Four fields, always four, so splitting on the slash stays unambiguous: the
+   two coordinates, the eye height, and the DEM override or "-" for none. The
+   override has to be in the key or a changed DEM would be answered out of the
+   cache with a profile swept from a different observer elevation. */
+const hzKey = () => hzPos() + '/' + STATE.eye + '/' + (demTyped() == null ? '-' : demTyped());
+
+/* The observer's ground elevation, by one rule, used everywhere:
+     1. a DEM typed for THIS position wins;
+     2. else the terrain model's reading of the tile the observer stands on;
+     3. else 0 m N2000 -- sea level, the only defensible number when nothing
+        knows better.
+   The old fallback here was the median base elevation of objects within 10 km.
+   It was one number for a whole neighbourhood, could not see a hill, and at
+   the default pin read 10.5 m against the tile's 8.0; on the crown of
+   Tahtitorninmaki 690 m north it still read 11.2 while the ground had risen to
+   32 m. A 21 m observer error is 0.12 degrees at 10 km, on every object at
+   once, so it is gone rather than hidden. */
+const demTyped = () => (STATE.dem != null && STATE.demAt === hzPos()) ? STATE.dem : null;
+function groundNow() {
+  const d = demTyped();
+  if (d != null) return d;
+  if (HZ.ground != null && HZ.posKey === hzPos()) return HZ.ground;
+  return 0;
+}
+
+/* Show the reader what the effective ground is, except while it is their own
+   typed number -- reformatting someone's input under their cursor is rude. */
+function syncGround() {
+  /* Retire an override the pin has walked away from, rather than leaving it
+     parked in STATE to reappear if the pin ever lands on that exact spot
+     again. The resolution rule ignores it either way; this is the discard. */
+  if (STATE.dem != null && STATE.demAt !== hzPos()) { STATE.dem = null; STATE.demAt = null; }
+  if (demTyped() != null) return;
+  const g = groundNow();
+  document.getElementById('odem').value =
+    Number.isInteger(g) ? String(g) : g.toFixed(1);
+}
 
 try {
   HZ.worker = new Worker('horizon.js');
@@ -667,7 +738,10 @@ try {
     HZ.err = null; HZ.failed = null;
     HZ.key = m.id;
     HZ.posKey = m.id.split('/').slice(0, 2).join('/');
-    HZ.ground = m.ground; HZ.groundSrc = m.groundSrc;
+    /* What the tile says, not what the sweep ran on: with a DEM override
+       those differ, and this field has to survive the override being cleared
+       without handing back the override's own number. */
+    HZ.ground = m.ground;
     HZ.prof = m.prof; HZ.profD = m.profD;
     HZ.off = m.off; HZ.stD = m.stD; HZ.stA = m.stA;
     HZ.stats = m.stats;
@@ -709,9 +783,14 @@ function hzRequest() {
     HZ.pending = key;
     HZ.err = null;
     HZ.t0 = performance.now();
-    HZ.worker.postMessage({
-      id: key, lat: STATE.lat, lon: STATE.lon, eye: STATE.eye
-    });
+    /* ground goes only when the user typed one. Absent, the worker reads the
+       observer's elevation off the tile exactly as it always has; present, it
+       sweeps from the typed elevation, so the drawn skyline and the objects'
+       geometry cannot be computed from two different observers. */
+    const dem = demTyped();
+    const msg = { id: key, lat: STATE.lat, lon: STATE.lon, eye: STATE.eye };
+    if (dem != null) msg.ground = dem;
+    HZ.worker.postMessage(msg);
     thint();
   }, 180);
 }
@@ -784,7 +863,7 @@ function thint() {
    due south reads -0.1584 -- so a dashed line at any other angle would draw
    the sea horizon twice, in two places. */
 function dipDeg() {
-  return Math.sqrt(2 * Math.max(0.5, (ground || 0) + STATE.eye) / REFF) * R2D;
+  return Math.sqrt(2 * Math.max(0.5, groundNow() + STATE.eye) / REFF) * R2D;
 }
 
 /* ------------------------------------------------------------------ *
@@ -795,38 +874,9 @@ function recompute() {
   if (!OBJECTS.length) return;
   hzRequest();
 
-  /* Observer ground elevation, from the terrain tile the observer stands on
-     -- horizon.js reads the finest one covering the point, which is what
-     terrain.py's ground_at(source="auto") does server-side.
-
-     The fallback below is what the page did before there was a terrain model:
-     the median base elevation of objects within 10 km. It is one number for a
-     whole neighbourhood and cannot see a hill. At the default pin it says
-     10.5 m against the tile's 8.0; move 690 m north onto the crown of
-     Tahtitorninmaki and it says 11.2 while the ground has risen to 32. A 21 m
-     observer error is 0.12 deg at 10 km, on every object at once. */
-  const hzOwn = HZ.ground != null && HZ.posKey === hzPos();
-  let near = [];
-  if (hzOwn) {
-    ground = HZ.ground;
-  } else {
-    for (const o of OBJECTS) {
-      if (o.ground_m == null) continue;
-      const dy = (o.lat - STATE.lat) * 111.32;
-      const dx = (o.lon - STATE.lon) * 111.32 * Math.cos(STATE.lat * D2R);
-      if (dx * dx + dy * dy < 100) near.push(o.ground_m);   // within 10 km
-    }
-    near.sort((a, b) => a - b);
-    ground = near.length ? near[near.length >> 1] : null;
-  }
-  const eyeAbs = (ground == null ? 0 : ground) + STATE.eye;
-  document.getElementById('ghint').innerHTML = hzOwn
-    ? 'ground <b>' + fmt(ground) + ' m</b> from the ' + HZ.groundSrc +
-      ', eye at <b>' + fmt(eyeAbs) + ' m</b> N2000'
-    : near.length
-      ? 'ground ≈ <b>' + fmt(ground) + ' m</b> from ' + near.length +
-        ' nearby bases, eye at <b>' + fmt(eyeAbs) + ' m</b> N2000'
-      : 'no nearby reference — eye taken as <b>' + fmt(STATE.eye) + ' m</b> N2000';
+  syncGround();
+  syncLocate();
+  const eyeAbs = groundNow() + STATE.eye;
 
   const maxm = STATE.maxd * 1000;
   const minm = STATE.mind * 1000;
@@ -1150,7 +1200,7 @@ function syncInputs() {
   document.getElementById('olat').value = STATE.lat.toFixed(5);
   document.getElementById('olon').value = STATE.lon.toFixed(5);
 }
-for (const [id, key] of [['olat', 'lat'], ['olon', 'lon'], ['oeye', 'eye']]) {
+for (const [id, key] of [['olat', 'lat'], ['olon', 'lon'], ['oagl', 'eye']]) {
   document.getElementById(id).onchange = e => {
     const v = parseFloat(e.target.value.replace(',', '.'));
     if (!isFinite(v)) { syncInputs(); return; }
@@ -1160,6 +1210,134 @@ for (const [id, key] of [['olat', 'lat'], ['olon', 'lon'], ['oeye', 'eye']]) {
       map.easeTo({ center: [STATE.lon, STATE.lat] });
     }
     recompute();
+  };
+}
+
+/* The DEM box, which is both a readout and an override. Emptying it hands the
+   question back to the terrain model. The typed value is pinned to the
+   position it was typed at, so an AGL change keeps it and a moved pin does
+   not -- the resolution rule does that part; this only records where. */
+document.getElementById('odem').onchange = e => {
+  const s = e.target.value.trim().replace(',', '.');
+  const v = parseFloat(s);
+  if (!isFinite(v)) {
+    STATE.dem = null; STATE.demAt = null;
+    syncGround();
+  } else {
+    STATE.dem = v; STATE.demAt = hzPos();
+  }
+  recompute();
+};
+
+/* Geolocation.
+ *
+ * Position only. The compass is deliberately absent (PLAN.md 11.1) but knowing
+ * WHERE you are is a different problem from knowing which way you face, and on
+ * a phone typing coordinates is miserable.
+ *
+ * Three things this deliberately does not do:
+ *  - it never reads coords.altitude. The W3C spec says ellipsoidal, Android
+ *    obeys, and WebKit returns CLLocation.altitude, which Apple documents as
+ *    mean sea level. The two platforms therefore disagree by the geoid
+ *    separation, 17.6 m in Helsinki. Ground and eye height stay typed numbers.
+ *  - it does not treat coords.accuracy as a standard deviation. The spec
+ *    defines it as a 95% radius, so it is roughly 2 sigma.
+ *  - it does not watch continuously by default. You stand still on a tower,
+ *    and a watch costs battery for nothing.
+ *
+ * The button carries no text, so everything it has to say goes in the title:
+ * the accuracy, and any failure. The alternative was a visible line of its
+ * own, which is the line this panel just lost.
+ */
+const locBtn = document.getElementById('locate');
+let watchId = null, lastAcc = null, geoFail = null;
+
+/* Position error matters most for NEAR objects: it is an angle divided by
+   range, so 10 m is 0.57 deg at 1 km and 0.01 deg at 50 km. Quote the range
+   inside which this fix is the dominant error rather than a bare radius. */
+function accText(m) {
+  const rms = m / 2;                       // 95% radius -> ~1 sigma
+  const km = (rms / Math.tan(0.1 * D2R)) / 1000;
+  return '±' + Math.round(m) + ' m (95%), dominates inside ~'
+    + (km < 10 ? km.toFixed(1) : Math.round(km)) + ' km';
+}
+
+/* The dot is on when the pin is still standing where geolocation put it.
+   Dragging it away, or typing coordinates, is the user saying otherwise, and
+   no map handler has to know about this button for that to work. */
+function syncLocate() {
+  const on = STATE.fixAt != null && STATE.fixAt === hzPos();
+  locBtn.classList.toggle('on', on);
+  locBtn.setAttribute('aria-pressed', watchId != null ? 'true' : 'false');
+  /* A disabled or failed button is already saying something in its title;
+     don't overwrite it with the idle text. */
+  if (locBtn.disabled || locBtn.hasAttribute('aria-busy')) return;
+  if (!on) { locBtn.title = geoFail || 'Use my location'; return; }
+  locBtn.title = (watchId != null ? 'Following your position' : 'Your position')
+    + (lastAcc == null ? '' : ' — ' + accText(lastAcc))
+    + (watchId != null ? '' : '. Double-click to follow');
+}
+
+function gotPosition(pos) {
+  STATE.lat = pos.coords.latitude;
+  STATE.lon = pos.coords.longitude;
+  STATE.fixAt = hzPos();
+  lastAcc = pos.coords.accuracy;
+  geoFail = null;
+  syncInputs();
+  marker.setLngLat([STATE.lon, STATE.lat]);
+  map.easeTo({ center: [STATE.lon, STATE.lat], zoom: Math.max(map.getZoom(), 11) });
+  locBtn.removeAttribute('aria-busy');
+  syncLocate();
+  recompute();
+}
+
+function geoError(err) {
+  locBtn.removeAttribute('aria-busy');
+  /* The old message here named a command and a port to run the page over
+     https. That was one machine's recipe, and meaningless on a hosted site;
+     what the browser is actually insisting on is a secure context. */
+  geoFail =
+    err.code === err.PERMISSION_DENIED
+      ? (window.isSecureContext
+          ? 'Location permission denied'
+          : 'Location needs a secure (https) connection')
+      : err.code === err.POSITION_UNAVAILABLE ? 'Position unavailable'
+      : err.code === err.TIMEOUT ? 'Location timed out — try again outdoors'
+      : 'Geolocation failed';
+  syncLocate();
+}
+
+if (!('geolocation' in navigator)) {
+  locBtn.disabled = true;
+  locBtn.title = 'Geolocation is not available in this browser';
+} else {
+  locBtn.onclick = () => {
+    if (watchId != null) {                 // second press stops following
+      navigator.geolocation.clearWatch(watchId);
+      watchId = null;
+      STATE.fixAt = null;
+      syncLocate();
+      return;
+    }
+    if (!window.isSecureContext) {
+      geoFail = 'Location needs a secure (https) connection';
+      syncLocate();
+      return;
+    }
+    geoFail = null;
+    locBtn.setAttribute('aria-busy', 'true');
+    locBtn.title = 'Locating…';
+    const opts = { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 };
+    navigator.geolocation.getCurrentPosition(gotPosition, geoError, opts);
+  };
+  /* Long-press, or double-click on a desktop, to keep following. Useful while
+     walking to the spot; pointless once you are standing on it. */
+  locBtn.ondblclick = () => {
+    if (watchId != null || !window.isSecureContext) return;
+    watchId = navigator.geolocation.watchPosition(gotPosition, geoError,
+      { enableHighAccuracy: true, timeout: 20000, maximumAge: 2000 });
+    syncLocate();
   };
 }
 
@@ -1387,7 +1565,7 @@ function drawPano() {
      old test is all there is -- an object nearer than the horizon distance is
      wholly in front of the bulge and drawn solid to its foot, one beyond it
      is cut off at the grazing line. */
-  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, (ground || 0) + STATE.eye));
+  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, groundNow() + STATE.eye));
   for (const o of vis) {
     const x = X(o.az);
     const yt = Math.max(Y(o.alt), RULER);
