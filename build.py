@@ -63,7 +63,11 @@ def cache_dir():
         d = os.path.join(base, "azimuth")
     try:
         os.makedirs(os.path.join(d, "raw"), exist_ok=True)
-        probe = os.path.join(d, ".writable")
+        # Per-process name. Several shards of a nationwide terrain run start
+        # at once, and a single shared probe file means they race to create
+        # and unlink it -- on Windows the losers get WinError 32 and exit
+        # claiming the cache is unusable, which it is not.
+        probe = os.path.join(d, ".writable-%d" % os.getpid())
         with open(probe, "w") as f:
             f.write("")
         os.remove(probe)

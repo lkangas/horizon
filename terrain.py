@@ -521,7 +521,7 @@ def tiles_over(cell_m, bbox=CUBE):
             for tx in range(tx0, tx1 + 1)]
 
 
-def fetch_nationwide(bbox=CUBE, cells=None, workers=8, verbose=True):
+def fetch_nationwide(bbox=CUBE, cells=None, workers=8, verbose=True, shard=None):
     """Every tile in the country, at every cell size the rings use.
 
     fetch_terrain covers a disc around one observer, which is the wrong shape
@@ -544,6 +544,17 @@ def fetch_nationwide(bbox=CUBE, cells=None, workers=8, verbose=True):
     report = []
     for cell_m in cells:
         want = tiles_over(cell_m, bbox)
+        if shard:
+            # Threads do not help here. Decoding a Float32 clip and max-pooling
+            # it is pure-Python work on a million cells, so the GIL pins the
+            # whole process to about one core however many workers are set --
+            # measured at 114% of one core on a twelve-core machine. Splitting
+            # the tile list across PROCESSES is what actually parallelises it.
+            # _build_tile writes through a .part file and os.replace, so shards
+            # racing on the same directory is safe; they simply never pick the
+            # same tile.
+            i, n = shard
+            want = [t for k, t in enumerate(want) if k % n == i]
         t0 = time.time()
         ship = fetched = 0
         wrote = 0
@@ -805,6 +816,10 @@ def main():
                     help="every tile in the country, not a disc around --lat/--lon")
     ap.add_argument("--cells", type=int, nargs="+",
                     help="restrict --nationwide to these cell sizes, metres")
+    ap.add_argument("--shard", metavar="I/N",
+                    help="take only every Nth tile, offset I. Run N of these "
+                         "as separate processes: the work is CPU bound in "
+                         "Python, so threads within one process do not scale")
     ap.add_argument("--ground", nargs=2, type=float, metavar=("LAT", "LON"),
                     help="just print ground_at() three ways and stop")
     a = ap.parse_args()
@@ -823,13 +838,19 @@ def main():
 
     if a.nationwide:
         cells = a.cells or sorted(TILE_PX)
+        shard = None
+        if a.shard:
+            i, n = (int(x) for x in a.shard.split("/"))
+            shard = (i, n)
         want = sum(len(tiles_over(c)) for c in cells)
+        if shard:
+            want = want // shard[1]
         print("nationwide terrain -> %s" % TERRAIN)
         print("cell sizes: %s" % ", ".join("%d m" % c for c in cells))
         print("%d tiles to ask for; the ones that are all nodata are not written"
               % want)
         t0 = time.time()
-        idx = fetch_nationwide(cells=cells, workers=a.workers)
+        idx = fetch_nationwide(cells=cells, workers=a.workers, shard=shard)
         r = idx["last_fetch"]
         print("  %-6s %6d asked  %6d written  %8.2f GB shipped  %6.0f s"
               % ("total", sum(x["tiles"] for x in r),
