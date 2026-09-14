@@ -639,7 +639,7 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
  * ------------------------------------------------------------------ */
 
 const HZ = {
-  worker: null, err: null,
+  worker: null, err: null, failed: null,
   key: null, posKey: null, pending: null, fetching: null, t0: 0, wall: 0,
   ground: null, groundSrc: null,
   prof: null, profD: null, off: null, stD: null, stA: null,
@@ -660,11 +660,11 @@ try {
     if (m.id !== HZ.pending) return;            // an answer for a place we left
     HZ.pending = null; HZ.fetching = null;
     if (!m.ok) {
-      HZ.err = m.error; HZ.prof = null; HZ.key = null;
+      HZ.err = m.error; HZ.prof = null; HZ.key = null; HZ.failed = m.id;
       thint(); recompute();
       return;
     }
-    HZ.err = null;
+    HZ.err = null; HZ.failed = null;
     HZ.key = m.id;
     HZ.posKey = m.id.split('/').slice(0, 2).join('/');
     HZ.ground = m.ground; HZ.groundSrc = m.groundSrc;
@@ -686,12 +686,17 @@ try {
 let hzTimer = null;
 function hzRequest() {
   if (!HZ.worker) return;
-  /* Not "&& !HZ.err": most of Finland has no tiles cached, so the first
-     answer at a new place is often "no terrain tile covers the observer",
-     and refusing to ask again after one of those left the page with no
-     terrain for the rest of the session once the pin came back. */
+  /* The gate is on the KEY that failed, not on HZ.err. Most of Finland has
+     no tiles cached, so the first answer at a new place is often "no terrain
+     tile covers the observer"; refusing to ask again after any failure left
+     the page with no terrain for the rest of the session once the pin came
+     back. But clearing HZ.key on failure and gating on nothing was worse --
+     the failure handler calls recompute(), recompute() calls this, and the
+     same doomed sweep was queued again forever. Where terrain is not
+     published at all that is an endless refetch of a file that will never
+     parse. Ask once per place; a new pin is a new question. */
   const key = hzKey();
-  if (key === HZ.key || key === HZ.pending) return;
+  if (key === HZ.key || key === HZ.pending || key === HZ.failed) return;
   /* A profile belongs to one place. Keep it across an eye-height change --
      it is a fraction of a degree out for the couple of hundred milliseconds
      the resweep takes -- but throw it away the moment the pin moves, because

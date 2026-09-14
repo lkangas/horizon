@@ -169,8 +169,18 @@ async function loadIndex() {
      fetches a new region, and a pinned stale index means the new tiles are
      never asked for. */
   const r = await fetch(BASE + 'index.json');
-  if (!r.ok) throw new Error('terrain/index.json: HTTP ' + r.status);
-  INDEX = await r.json();
+  if (!r.ok) throw new Error('no elevation tiles here (HTTP ' + r.status + ')');
+  /* Not r.json() directly. A static host that rewrites unknown paths to the
+     app shell -- the default almost everywhere -- answers this with 200 and
+     the page's own HTML rather than 404, so the status says nothing about
+     whether terrain exists. Parsing that as JSON raises "Unexpected token
+     '<'", which is both wrong and unreadable to anyone looking at it. */
+  const body = await r.text();
+  try {
+    INDEX = JSON.parse(body);
+  } catch (e) {
+    throw new Error('no elevation tiles published for this site');
+  }
   if (INDEX.origin) { GRID_E0 = INDEX.origin[0]; GRID_N0 = INDEX.origin[1]; }
   return INDEX;
 }
