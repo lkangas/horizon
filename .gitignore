@@ -10,3 +10,4 @@ devkey.pem
 devcert.ip
 tscert.pem
 tskey.pem
+hills.json
