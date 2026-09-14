@@ -1197,7 +1197,7 @@ Attribution:
 
 ## 10. Order of work
 
-**v0 — objects only, no terrain.** `build.py` pulls MTK tower points over Range, fuses AIP heights, samples
+**v0 — objects only, no terrain.** *(built)* `build.py` pulls MTK tower points over Range, fuses AIP heights, samples
 nDSM for the rest, emits `objects.json`. `index.html` is the espoo page with a different payload:
 map, observer pin, horizon strip and a sortable azimuth table. The strip draws objects only: their
 azimuth and elevation are closed-form, so no DEM is needed. What the missing terrain costs is
@@ -1260,10 +1260,14 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
 2. **Water towers filed as buildings.** MML's catalogue says a >500 m² water tower may be stored as a
    building polygon. How many actually are, and whether coordinate-matching `Vesitornin selite`
    (45802) against footprints recovers them, is unmeasured.
-3. **Forest occlusion in practice.** The p90 DSM−DTM gap is 21.4 m. Whether a canopy term improves
+3. **Water towers hiding in buildings** turned out not to matter much in the end: the surface
+   model heights every one of the 420 `vesitorni` points directly, so the class is complete whether
+   or not the biggest examples are also filed as building polygons.
+
+4. **Forest occlusion in practice.** The p90 DSM−DTM gap is 21.4 m. Whether a canopy term improves
    the felt accuracy or just removes objects that are actually visible — a mast top pokes over the
    trees the whole way — needs a field test.
-4. **The 60–100 m tier.** The register holds everything above 60 m nationwide while the published
+5. **The 60–100 m tier.** The register holds everything above 60 m nationwide while the published
    extract cuts at 100 m, so a tier of water towers and chimneys exists and is not on the website.
    Requests go through Fintraffic's *selvityspyyntö lentoesteestä* web form at 204 EUR + VAT per
    obstacle — a per-object price, so almost certainly not worth it. The useful part of asking would

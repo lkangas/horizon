@@ -996,11 +996,13 @@ function drawPano() {
   cx2.fillStyle = '#f7f6f3';              // sky is paper, not blue
   cx2.fillRect(0, 0, w, h);
 
-  /* Ground below the horizon, a shade darker than the sky so the horizon
-     reads without needing a heavy line. */
+  /* Ground starts at the TRUE horizon (0 minus the dip), not at eye level.
+     Filling from 0 put the shading a dip's worth too high and made the two
+     lines harder to tell apart, not easier. */
   const yH = Y(0);
+  const yD = Y(-dip);
   cx2.fillStyle = '#efe9df';
-  cx2.fillRect(0, yH, w, h - yH);
+  cx2.fillRect(0, yD, w, h - yD);
 
   /* --- elevation grid --- */
   cx2.strokeStyle = '#e6e0d6';
@@ -1028,7 +1030,6 @@ function drawPano() {
   cx2.strokeStyle = '#c9bfae';
   cx2.beginPath(); cx2.moveTo(0, yH + 0.5); cx2.lineTo(w, yH + 0.5); cx2.stroke();
 
-  const yD = Y(-dip);
   if (yD > RULER && yD < h) {
     cx2.save();
     cx2.strokeStyle = '#b4531d';
@@ -1045,24 +1046,38 @@ function drawPano() {
   const vis = view.filter(o => o.alt != null && Math.abs(dAz(o.az, PANO.ctr)) < half + 1);
   vis.sort((a, b) => a.dist - b.dist);                 // far behind near
 
-  /* Beyond the horizon distance the Earth cuts the object off: its lowest
-     visible point is where the ray grazes, which is the horizon line at
-     -dip. Nearer than that you can see all the way down to its base, which
-     is well below -dip for anything close. Drawing every object down to its
-     base regardless turns the strip into a picket fence and claims you can
-     see through the planet. */
-  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, STATE.eye));
+  /* Each object is split at the horizon line. The part above it stands
+     against the sky and is what you actually match against a skyline; the part
+     below is seen against the ground, so it is drawn dotted and faint rather
+     than either omitted or given equal weight. An object whose top falls below
+     the line is against the ground along its whole length and is filtered out
+     upstream, not drawn dim. */
   for (const o of vis) {
     const x = X(o.az);
-    const yt = Y(o.alt);
-    const base = o.dist > dHorizon ? -dip : (o.altBase != null ? o.altBase : 0);
-    const yb = Math.min(Y(base), h);
-    cx2.strokeStyle = distColor(o.dist / 1000);
-    cx2.globalAlpha = o.i === STATE.sel ? 1 : 0.85;
-    cx2.lineWidth = o.i === STATE.sel ? 2.5 : 1.4;
+    const yt = Math.max(Y(o.alt), RULER);
+    const yb = Math.min(Y(o.altBase != null ? o.altBase : 0), h);
+    const ySplit = Math.min(Math.max(yD, yt), yb);
+    const col = distColor(o.dist / 1000);
+    const selected = o.i === STATE.sel;
+
+    if (yb > ySplit) {                       // below the horizon: against ground
+      cx2.save();
+      cx2.strokeStyle = col;
+      cx2.globalAlpha = selected ? 0.5 : 0.28;
+      cx2.lineWidth = selected ? 2.5 : 1.4;
+      cx2.setLineDash([2, 3]);
+      cx2.beginPath();
+      cx2.moveTo(x, ySplit);
+      cx2.lineTo(x, yb);
+      cx2.stroke();
+      cx2.restore();
+    }
+    cx2.strokeStyle = col;
+    cx2.globalAlpha = selected ? 1 : 0.85;
+    cx2.lineWidth = selected ? 2.5 : 1.4;
     cx2.beginPath();
-    cx2.moveTo(x, Math.max(yt, RULER));
-    cx2.lineTo(x, Math.max(yb, RULER));
+    cx2.moveTo(x, yt);
+    cx2.lineTo(x, ySplit);
     cx2.stroke();
     // a cap at the top, which is the bit you actually match against a skyline
     cx2.fillStyle = distColor(o.dist / 1000);

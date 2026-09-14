@@ -3,6 +3,7 @@
 
     python build.py fetch          # populate the cache (resumable)
     python build.py build          # cache -> objects.json
+    python build.py ndsm           # heights for what has none, then build again
     python build.py stats          # what is in the cache
 
 Everything is Python 3 stdlib. No GDAL, no node, no database.
@@ -17,6 +18,7 @@ Bulk data never lands in the repo; see cache_dir().
 """
 
 import calendar
+import concurrent.futures as futures
 import csv
 import io
 import json
@@ -25,6 +27,7 @@ import os
 import re
 import struct
 import sys
+import threading
 import time
 import zlib
 import urllib.error
@@ -496,6 +499,25 @@ area["ISO3166-1"="FI"][admin_level=2]->.fi;
 out center tags;
 """
 
+# Tall buildings, as a separate query so the structures cache above stays
+# valid. Overpass's (if:) filter does the numeric comparison server-side, which
+# keeps this to a few thousand rows instead of the 331,744 buildings in Finland
+# that carry a building:levels tag.
+#
+# No storey-height assumption is made here: buildings with a height tag use it,
+# and the rest are measured by the surface model, which is accurate on a solid
+# footprint even though it struggles with lattice masts.
+OVERPASS_BUILDINGS = """
+[out:json][timeout:900];
+area["ISO3166-1"="FI"][admin_level=2]->.fi;
+(
+  nwr["building"]["height"](if: number(t["height"]) >= 25)(area.fi);
+  nwr["building"]["building:levels"](if: number(t["building:levels"]) >= 8)(area.fi);
+);
+out center tags;
+"""
+
+
 OSM_CAT = {
     "mast": "mast",
     "communications_tower": "mast",
@@ -578,6 +600,63 @@ def _osm_age(d):
     except ValueError:
         return None
     return (time.time() - calendar.timegm(t)) / 86400.0
+
+
+def fetch_buildings(max_age_days=45):
+    dest = raw("osm_buildings.json")
+    if os.path.exists(dest):
+        with open(dest, encoding="utf-8") as f:
+            age = _osm_age(json.load(f))
+        if age is not None and age <= max_age_days:
+            print("osm_buildings.json present and %.0f days old, skipping" % age)
+            return
+    body = OVERPASS_BUILDINGS.encode()
+    for url in OVERPASS_MIRRORS:
+        host = urllib.parse.urlsplit(url).netloc
+        try:
+            print("  %-32s ..." % host, end="", flush=True)
+            req = urllib.request.Request(url, data=body, headers=UA)
+            with urllib.request.urlopen(req, timeout=1200) as r:
+                blob = r.read()
+            d = json.loads(blob)
+            n = len(d.get("elements", []))
+            age = _osm_age(d)
+            if n < 200:
+                print(" %d elements -- wrong extract?" % n)
+                continue
+            if age is None or age > max_age_days:
+                print(" %d elements but stale" % n)
+                continue
+            print(" %d buildings, %.0f days old" % (n, age))
+            with open(dest, "wb") as f:
+                f.write(blob)
+            return
+        except Exception as e:
+            print(" %s" % type(e).__name__)
+    sys.exit("every Overpass mirror failed for the building query")
+
+
+def load_buildings():
+    path = raw("osm_buildings.json")
+    if not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        d = json.load(f)
+    out = []
+    for el in d.get("elements", []):
+        t = el.get("tags") or {}
+        lat = el.get("lat") or (el.get("center") or {}).get("lat")
+        lon = el.get("lon") or (el.get("center") or {}).get("lon")
+        if lat is None or lon is None:
+            continue
+        h = num(t.get("height")) or num(t.get("building:height"))
+        out.append({
+            "cat": "building", "lat": lat, "lon": lon, "ground_m": None,
+            "height_m": h, "src_h": "osm" if h else None,
+            "name": t.get("name"), "src_pos": "osm",
+            "levels": num(t.get("building:levels")),
+        })
+    return out
 
 
 def load_osm():
@@ -906,13 +985,146 @@ def wgs84_to_tm35(lat, lon):
     return _FE + _K0 * A * eta, _K0 * A * xi
 
 
+# --------------------------------------------------------------------------
+# Heights from the national normalised surface model.
+#
+# Three whole classes -- water towers, observation towers, bell towers -- have
+# no height in MTK's data model under any circumstances, and the aviation
+# register only publishes above 100 m AGL, which almost none of them reach. The
+# nDSM is the only source that sees them: it is a lidar surface model expressed
+# as height above ground, so sampling its maximum over a structure's footprint
+# IS the structure's height.
+#
+# CSC's GeoCubes serves it as WMS, and FORMAT=image/envi returns raw
+# little-endian uint16 in DECIMETRES, which is how this reads it with no GDAL.
+# A 64x64 window at 1 m comes back as exactly 8192 bytes.
+#
+# Checked against structures whose height is known independently: the Suomenoja
+# stack reads 148.1 m against MTK's recorded 149.3 m.
+#
+# Its weakness is thin lattice: a guyed mast top falls through a 2 m grid, and
+# roughly 43% of masts read more than 20 m low. That is why this never lowers a
+# height another source supplied, and why everything it produces is flagged.
+# --------------------------------------------------------------------------
+
+NDSM_URL = "https://vm0160.kaj.pouta.csc.fi/ogiir"
+NDSM_LAYERS = ("ndsm_2025", "ndsm_2024")     # 2024 fills gaps in the 2025 scan
+NDSM_HALF = 32.0                             # metres either side of the point
+NDSM_N = 64
+NDSM_MIN = 3.0                               # below this it is ground, not a structure
+
+
+def ndsm_window(lat, lon, layer, half=NDSM_HALF, n=NDSM_N):
+    """max height above ground within `half` metres, or None."""
+    e, nn = wgs84_to_tm35(lat, lon)
+    url = ("%s?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap&LAYERS=%s&STYLES="
+           "&SRS=EPSG:3067&BBOX=%.1f,%.1f,%.1f,%.1f&WIDTH=%d&HEIGHT=%d"
+           "&FORMAT=image/envi" % (NDSM_URL, layer, e - half, nn - half,
+                                   e + half, nn + half, n, n))
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers=UA)
+            with urllib.request.urlopen(req, timeout=90) as r:
+                blob = r.read()
+            break
+        except Exception:
+            if attempt == 2:
+                return None
+            time.sleep(1.5 * (attempt + 1))
+    if len(blob) != n * n * 2:
+        return None                          # MapServer error page, not pixels
+    vals = struct.unpack("<%dH" % (n * n), blob)
+    hi = max(vals)
+    return hi / 10.0 if hi else 0.0
+
+
+def ndsm_key(o):
+    return "%.6f,%.6f" % (o["lat"], o["lon"])
+
+
+def fetch_ndsm(workers=8):
+    """Sample the nDSM for every object in objects.json that has no height.
+
+    Cached by position, so a re-run costs nothing and an interrupted run
+    resumes. Run it AFTER a build, then build again to fold the results in.
+    """
+    if not os.path.exists(OUT):
+        sys.exit("no objects.json yet -- run: python build.py build")
+    with open(OUT, encoding="utf-8") as f:
+        objs = json.load(f)["objects"]
+
+    dest = raw("ndsm.json")
+    done = {}
+    if os.path.exists(dest):
+        with open(dest, encoding="utf-8") as f:
+            done = json.load(f)
+
+    todo = [o for o in objs
+            if o.get("height_m") is None and ndsm_key(o) not in done]
+    print("  %d objects without a height, %d already sampled, %d to do"
+          % (sum(1 for o in objs if o.get("height_m") is None), len(done), len(todo)))
+    if not todo:
+        return
+
+    lock = threading.Lock()
+    counter = [0]
+
+    def work(o):
+        h = None
+        for layer in NDSM_LAYERS:
+            v = ndsm_window(o["lat"], o["lon"], layer)
+            if v is not None and v >= NDSM_MIN:
+                h = v
+                break
+            if v is None:
+                continue                     # request failed; try the older year
+        with lock:
+            done[ndsm_key(o)] = h
+            counter[0] += 1
+            if counter[0] % 250 == 0:
+                print("    %d / %d" % (counter[0], len(todo)), flush=True)
+                with open(dest, "w", encoding="utf-8") as f:
+                    json.dump(done, f)
+
+    with futures.ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(work, todo))
+
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(done, f)
+    got = sum(1 for v in done.values() if v)
+    print("  %d sampled, %d with a usable height (%.0f%%)"
+          % (len(done), got, 100.0 * got / max(1, len(done))))
+
+
+def apply_ndsm(objs):
+    """Fold cached nDSM heights in. Never lowers a height another source gave."""
+    path = raw("ndsm.json")
+    if not os.path.exists(path):
+        return 0
+    with open(path, encoding="utf-8") as f:
+        done = json.load(f)
+    n = 0
+    for o in objs:
+        if o.get("height_m") is not None:
+            continue
+        v = done.get(ndsm_key(o))
+        if not v or v < NDSM_MIN:
+            continue
+        o["height_m"] = round(v, 1)
+        o["src_h"] = "ndsm"
+        o["conf"] = "lidar"
+        n += 1
+    return n
+
+
 def build():
     mtk = []
     if os.path.exists(raw("mtk.json")):
         with open(raw("mtk.json"), encoding="utf-8") as f:
             mtk = json.load(f)
-    aip, osm = load_aip(), load_osm()
-    print("  mtk %5d   aip %5d   osm %5d" % (len(mtk), len(aip), len(osm)))
+    aip, osm, bld = load_aip(), load_osm(), load_buildings()
+    print("  mtk %5d   aip %5d   osm %5d   buildings %5d"
+          % (len(mtk), len(aip), len(osm), len(bld)))
 
     # 150 m for the register: where MTK holds the same object the median
     # offset is 1 m, and the masts MTK genuinely lacks have their nearest MTK
@@ -921,6 +1133,10 @@ def build():
     # stacks and paired old/new masts that share a site.
     objs = merge(mtk, aip, radius=150.0)
     objs = merge(objs, osm, radius=60.0)
+    # Buildings merge only into other buildings and towers (COMPATIBLE), and at
+    # a tighter radius: city blocks put distinct towers 40 m apart.
+    objs = merge(objs, bld, radius=30.0)
+    print('  heights from the surface model: %d' % apply_ndsm(objs))
     print('  filled ground from the 100 m model: %d' % sample_dem(objs))
 
     for o in objs:
@@ -972,7 +1188,7 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     print("cache: %s" % CACHE)
     if cmd == "fetch":
-        which = sys.argv[2:] or ["mtk", "aip", "osm", "dem"]
+        which = sys.argv[2:] or ["mtk", "aip", "osm", "buildings", "dem"]
         if "mtk" in which:
             fetch_mtk()
         if "aip" in which:
@@ -981,8 +1197,12 @@ def main():
             fetch_osm()
         if "dem" in which:
             fetch_dem()
+        if "buildings" in which:
+            fetch_buildings()
     elif cmd == "build":
         build()
+    elif cmd == "ndsm":
+        fetch_ndsm()
     elif cmd == "stats":
         if not os.path.exists(OUT):
             sys.exit("no objects.json yet -- run: python build.py build")
