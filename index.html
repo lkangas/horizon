@@ -1100,21 +1100,17 @@ function drawPano() {
   cx2.font = '11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
   cx2.textBaseline = 'alphabetic';
   cx2.textAlign = 'left';
-  /* At most three labels per 10 degrees of azimuth, ranked by apparent
-     height with named objects preferred. Without this a 120-degree window
-     over the capital region asks for ~200 labels and renders as a smear. */
-  const bucket = new Map();
-  for (const o of vis) {
-    const k = Math.round(o.az / 10);
-    if (!bucket.has(k)) bucket.set(k, []);
-    bucket.get(k).push(o);
-  }
-  const labelled = [];
-  for (const arr of bucket.values()) {
-    arr.sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || (b.ang || 0) - (a.ang || 0));
-    labelled.push(...arr.slice(0, 3));
-  }
-  labelled.sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || (b.ang || 0) - (a.ang || 0));
+  /* Label density is a question of SCREEN WIDTH, not of azimuth.
+     A fixed "3 per 10 degrees" budget caps a 45-degree window at about twelve
+     labels however wide the strip is, so zooming in bought no extra detail and
+     named buildings ate the whole allowance. Instead, offer every object in
+     order of importance and let the collision stagger below decide what fits:
+     it already knows the pixel geometry. The cap is only there to bound the
+     work when a window holds thousands of objects. */
+  const labelled = vis
+    .slice()
+    .sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || (b.ang || 0) - (a.ang || 0))
+    .slice(0, 400);
 
   const taken = [];
   const clash = (x, tw, y) => taken.some(
@@ -1129,12 +1125,18 @@ function drawPano() {
        always hard against the ruler -- fitAlt scales the view to it -- so
        there is never room above it and it was the one object that never got
        a name. Fall back to placing the label below its cap. */
+    /* Try a few rows above the cap, then a few below, and DROP the label if
+       none of them is clear. Drawing it anyway once the attempts run out is
+       what turned a dense window into a grey smear: the stagger looked like it
+       was preventing overlap while quietly giving up and overprinting. Letting
+       labels fall out here is what makes density self-limiting -- they fill
+       the space available and stop. */
     let y = yt - 7, tries = 0;
-    while (tries < 6 && clash(x, tw, y)) { y -= 12; tries++; }
-    if (y < RULER + 12) {
+    while (tries < 5 && clash(x, tw, y)) { y -= 12; tries++; }
+    if (y < RULER + 12 || clash(x, tw, y)) {
       y = yt + 14;
       tries = 0;
-      while (tries < 6 && clash(x, tw, y)) { y += 12; tries++; }
+      while (tries < 5 && clash(x, tw, y)) { y += 12; tries++; }
       if (y > h - 4 || clash(x, tw, y)) continue;
     }
     taken.push({ x0: x - 2, x1: x + tw + 2, y });
