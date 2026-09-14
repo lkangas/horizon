@@ -309,6 +309,17 @@
     </div>
 
     <div class="field">
+      <label class="cap">Terrain</label>
+      <div class="row">
+        <label class="chk"><input type="checkbox" id="canopy"> Treeline</label>
+        <input type="number" id="canopyh" value="15" step="1" min="0" max="40"
+               title="canopy height added to every land cell, metres" style="width:58px">
+        <span class="val" style="min-width:0;flex:1;text-align:left">m on land</span>
+      </div>
+      <div class="hint" id="thint">&nbsp;</div>
+    </div>
+
+    <div class="field">
       <label class="cap">Show</label>
       <div class="seg" id="seg-cat">
         <button data-v="all" aria-pressed="true">All</button>
@@ -468,6 +479,12 @@ const CATLABEL = {
   obstower: 'tower', belltower: 'bell tower', lighthouse: 'lighthouse', building: 'building'
 };
 const TOWERISH = new Set(['obstower', 'watertower', 'belltower', 'lighthouse', 'building']);
+/* Categories whose generic fallback label is not worth the pixels in the
+   horizon strip. "building" against a skyline of buildings says nothing, and
+   unnamed buildings outnumber every other category put together, so they were
+   crowding out labels that do identify something. They keep their cap, their
+   line and their table row -- only the label is dropped. */
+const NOLABEL = new Set(['building']);
 
 const map = new maplibregl.Map({
   container: 'map',
@@ -607,35 +624,215 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g,
   c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 /* ------------------------------------------------------------------ *
+ * Terrain.
+ *
+ * horizon.js does the work in a Worker: it decodes the AZT1 tiles, reads the
+ * observer's own ground out of the finest one, and ray-casts 3600 azimuths
+ * into a horizon profile. What comes back is
+ *
+ *   prof[b]   the horizon elevation, degrees, at azimuth b*0.1
+ *   profD[b]  how far away the terrain that sets it is
+ *   off/stD/stA   a monotone staircase of (distance, elevation) per bin
+ *
+ * The staircase is the part that matters for occlusion. prof[b] is a maximum
+ * over the whole 90 km ray, so testing an object against it hides a 60 m
+ * building at 3 km behind a 120 m hill 22 km BEHIND IT. hzAt() asks the
+ * staircase for the horizon within r < d instead, which is the real question.
+ * Counted at the default pin, out to 60 km: the profile alone would call
+ * 1,341 objects hidden, the staircase calls 1,127, so 221 of them -- one in
+ * six -- are things you can actually see, wrongly buried by terrain standing
+ * behind them.
+ * ------------------------------------------------------------------ */
+
+const HZ = {
+  worker: null, err: null,
+  key: null, posKey: null, pending: null, fetching: null, t0: 0, wall: 0,
+  ground: null, groundSrc: null,
+  prof: null, profD: null, off: null, stD: null, stA: null,
+  stats: null, canopy: 0, hidden: 0
+};
+
+const hzPos = () => STATE.lat.toFixed(6) + '/' + STATE.lon.toFixed(6);
+const hzKey = () => hzPos() + '/' + STATE.eye + '/' + HZ.canopy;
+
+try {
+  HZ.worker = new Worker('horizon.js');
+  HZ.worker.onmessage = e => {
+    const m = e.data;
+    if (m.stage === 'tiles') {
+      if (m.id === HZ.pending) { HZ.fetching = [m.done, m.want]; thint(); }
+      return;
+    }
+    if (m.id !== HZ.pending) return;            // an answer for a place we left
+    HZ.pending = null; HZ.fetching = null;
+    if (!m.ok) {
+      HZ.err = m.error; HZ.prof = null; HZ.key = null;
+      thint(); recompute();
+      return;
+    }
+    HZ.err = null;
+    HZ.key = m.id;
+    HZ.posKey = m.id.split('/').slice(0, 2).join('/');
+    HZ.ground = m.ground; HZ.groundSrc = m.groundSrc;
+    HZ.prof = m.prof; HZ.profD = m.profD;
+    HZ.off = m.off; HZ.stD = m.stD; HZ.stA = m.stA;
+    HZ.stats = m.stats;
+    HZ.wall = performance.now() - HZ.t0;
+    recompute();
+  };
+  HZ.worker.onerror = ev => {
+    HZ.err = ev.message || 'horizon.js failed to start';
+    HZ.pending = null; HZ.prof = null;
+    thint();
+  };
+} catch (e) {
+  HZ.err = String(e && e.message || e);
+}
+
+let hzTimer = null;
+function hzRequest() {
+  if (!HZ.worker) return;
+  /* Not "&& !HZ.err": most of Finland has no tiles cached, so the first
+     answer at a new place is often "no terrain tile covers the observer",
+     and refusing to ask again after one of those left the page with no
+     terrain for the rest of the session once the pin came back. */
+  const key = hzKey();
+  if (key === HZ.key || key === HZ.pending) return;
+  /* A profile belongs to one place. Keep it across an eye-height change --
+     it is a fraction of a degree out for the couple of hundred milliseconds
+     the resweep takes -- but throw it away the moment the pin moves, because
+     then it is a picture of somewhere else. */
+  if (HZ.posKey !== hzPos()) {
+    HZ.prof = null; HZ.key = null; HZ.ground = null; HZ.posKey = null;
+  }
+  clearTimeout(hzTimer);
+  hzTimer = setTimeout(() => {
+    HZ.pending = key;
+    HZ.err = null;
+    HZ.t0 = performance.now();
+    HZ.worker.postMessage({
+      id: key, lat: STATE.lat, lon: STATE.lon, eye: STATE.eye, canopy: HZ.canopy
+    });
+    thint();
+  }, 180);
+}
+
+/* The horizon in one bin, restricted to terrain nearer than d metres.
+   Binary search for the last breakpoint before d; the staircase is monotone
+   in both distance and elevation, so that entry IS the maximum over r < d. */
+function hzBin(b, d) {
+  const lo = HZ.off[b], hi = HZ.off[b + 1];
+  const q = d / 10;                             // stD is in 10 m units
+  let a = lo, z = hi;
+  while (a < z) { const m = (a + z) >> 1; if (HZ.stD[m] < q) a = m + 1; else z = m; }
+  return a > lo ? a - 1 : -1;
+}
+
+/* Sub-bin placement, PLAN.md 5.2: the object sits at its analytic azimuth and
+   the profile is interpolated between the two rays either side of it. It is
+   also what the silhouette is drawn from, so the picture and the test agree
+   about whether a top clears a ridge. */
+function hzAt(az, d) {
+  if (!HZ.prof) return null;
+  const f = ((az % 360) + 360) % 360 / 0.1;
+  const b0 = Math.floor(f) % 3600, b1 = (b0 + 1) % 3600, t = f - Math.floor(f);
+  const i0 = hzBin(b0, d), i1 = hzBin(b1, d);
+  const a0 = i0 < 0 ? -90 : HZ.stA[i0] / 100;
+  const a1 = i1 < 0 ? -90 : HZ.stA[i1] / 100;
+  return a0 + (a1 - a0) * t;
+}
+
+/* How far away the terrain that hides it is -- nearest ray only, for the
+   readout. */
+function hzDistAt(az, d) {
+  if (!HZ.prof) return null;
+  const b = Math.round(((az % 360) + 360) % 360 / 0.1) % 3600;
+  const i = hzBin(b, d);
+  return i < 0 ? null : HZ.stD[i] * 10;
+}
+
+/* The whole-ray horizon, for the silhouette. */
+function hzProf(az) {
+  const f = ((az % 360) + 360) % 360 / 0.1;
+  const b0 = Math.floor(f) % 3600, t = f - Math.floor(f);
+  const a = HZ.prof[b0], b = HZ.prof[(b0 + 1) % 3600];
+  return a + (b - a) * t;
+}
+
+function thint() {
+  const el = document.getElementById('thint');
+  if (!el) return;
+  if (HZ.err && !HZ.prof) { el.textContent = 'no terrain — ' + HZ.err; return; }
+  if (HZ.fetching) {
+    el.textContent = 'terrain tiles ' + HZ.fetching[0] + '/' + HZ.fetching[1] + '…';
+    return;
+  }
+  if (HZ.pending) { el.textContent = 'sweeping the horizon…'; return; }
+  if (!HZ.stats) { el.innerHTML = '&nbsp;'; return; }
+  const s = HZ.stats;
+  el.innerHTML = '3,600 rays &middot; <b>' + Math.round(s.msSweep) + ' ms</b> sweep, ' +
+    Math.round(s.msFetch) + ' ms tiles &middot; ' + s.tiles + ' tiles' +
+    (s.skipped ? ' (' + s.skipped + ' too low to matter)' : '') +
+    ' &middot; <b>' + HZ.hidden + '</b> in range hidden by terrain';
+}
+
+/* Dip of the sea horizon. It is set by the eye's height above SEA LEVEL, not
+   above whatever it is standing on: at the default pin in Kaivopuisto a 20 m
+   eye on 8 m of ground is 28 m above the water, and the horizon is 0.1584 deg
+   down rather than the 0.1339 the eye height alone gives. That was tolerable
+   while the ground elevation was a guess. It is not now, because the
+   ray-caster over open water produces exactly -dip -- checked, the profile
+   due south reads -0.1584 -- so a dashed line at any other angle would draw
+   the sea horizon twice, in two places. */
+function dipDeg() {
+  return Math.sqrt(2 * Math.max(0.5, (ground || 0) + STATE.eye) / REFF) * R2D;
+}
+
+/* ------------------------------------------------------------------ *
  * Compute.
  * ------------------------------------------------------------------ */
 
 function recompute() {
   if (!OBJECTS.length) return;
+  hzRequest();
 
-  /* Observer ground elevation. There is no terrain model on the client in
-     this version, so it is estimated from the ground elevations the nearby
-     objects already carry -- every one of them was sampled at its own base.
-     Rough, clearly labelled, and free; a real DEM lookup arrives with the
-     panorama. */
-  let near = [], n = 0;
-  for (const o of OBJECTS) {
-    if (o.ground_m == null) continue;
-    const dy = (o.lat - STATE.lat) * 111.32;
-    const dx = (o.lon - STATE.lon) * 111.32 * Math.cos(STATE.lat * D2R);
-    if (dx * dx + dy * dy < 100) near.push(o.ground_m);   // within 10 km
+  /* Observer ground elevation, from the terrain tile the observer stands on
+     -- horizon.js reads the finest one covering the point, which is what
+     terrain.py's ground_at(source="auto") does server-side.
+
+     The fallback below is what the page did before there was a terrain model:
+     the median base elevation of objects within 10 km. It is one number for a
+     whole neighbourhood and cannot see a hill. At the default pin it says
+     10.5 m against the tile's 8.0; move 690 m north onto the crown of
+     Tahtitorninmaki and it says 11.2 while the ground has risen to 32. A 21 m
+     observer error is 0.12 deg at 10 km, on every object at once. */
+  const hzOwn = HZ.ground != null && HZ.posKey === hzPos();
+  let near = [];
+  if (hzOwn) {
+    ground = HZ.ground;
+  } else {
+    for (const o of OBJECTS) {
+      if (o.ground_m == null) continue;
+      const dy = (o.lat - STATE.lat) * 111.32;
+      const dx = (o.lon - STATE.lon) * 111.32 * Math.cos(STATE.lat * D2R);
+      if (dx * dx + dy * dy < 100) near.push(o.ground_m);   // within 10 km
+    }
+    near.sort((a, b) => a - b);
+    ground = near.length ? near[near.length >> 1] : null;
   }
-  near.sort((a, b) => a - b);
-  ground = near.length ? near[near.length >> 1] : null;
   const eyeAbs = (ground == null ? 0 : ground) + STATE.eye;
-  document.getElementById('ghint').innerHTML = near.length
-    ? 'ground ≈ <b>' + fmt(ground) + ' m</b> from ' + near.length +
-      ' nearby bases, eye at <b>' + fmt(eyeAbs) + ' m</b> N2000'
-    : 'no nearby reference — eye taken as <b>' + fmt(STATE.eye) + ' m</b> N2000';
+  document.getElementById('ghint').innerHTML = hzOwn
+    ? 'ground <b>' + fmt(ground) + ' m</b> from the ' + HZ.groundSrc +
+      ', eye at <b>' + fmt(eyeAbs) + ' m</b> N2000'
+    : near.length
+      ? 'ground ≈ <b>' + fmt(ground) + ' m</b> from ' + near.length +
+        ' nearby bases, eye at <b>' + fmt(eyeAbs) + ' m</b> N2000'
+      : 'no nearby reference — eye taken as <b>' + fmt(STATE.eye) + ' m</b> N2000';
 
   const maxm = STATE.maxd * 1000;
   const minm = STATE.mind * 1000;
-  const dip = Math.sqrt(2 * Math.max(0.5, STATE.eye) / REFF) * R2D;
+  const dip = dipDeg();
+  let hidden = 0;
   const out = [];
   for (let i = 0; i < OBJECTS.length; i++) {
     const o = OBJECTS[i];
@@ -657,16 +854,21 @@ function recompute() {
       const base = o.ground_m != null ? o.ground_m : o.top_m - (o.height_m || 0);
       o.altBase = Math.atan2(base - eyeAbs - drop, g.d) * R2D;
       o.ang = Math.max(0, o.alt - o.altBase);        // visible angular height
-      /* Above the refracted horizon iff the top's apparent elevation clears
-         the horizon dip for this eye height. No terrain is consulted, so this
-         is the geometric horizon only -- a hill or a treeline in the way is
-         not modelled until the panorama arrives. */
-      o.above = o.alt > -dip;
+      /* Visible iff the top clears the land horizon IN FRONT OF IT. With no
+         profile that falls back to the geometric sea horizon, which is what
+         the page did before the ray-caster: a hill in the way was simply not
+         modelled. Note the terrain horizon is never below -dip, because every
+         ray sees sea at 0 m N2000 and the sea's own maximum is the dip. */
+      o.hor = hzAt(o.az, g.d);
+      o.above = o.hor != null ? o.alt > o.hor : o.alt > -dip;
+      if (o.hor != null && !o.above) hidden++;
     } else {
-      o.alt = null; o.altBase = null; o.ang = null; o.above = null;
+      o.alt = null; o.altBase = null; o.ang = null; o.above = null; o.hor = null;
     }
     out.push(o);
   }
+  HZ.hidden = hidden;
+  thint();
   view = out.filter(pass);
   sortView();
   paint();
@@ -813,12 +1015,23 @@ function drawReadout(d, w, h, RULER) {
       + (o.alt >= 0 ? '+' : '') + o.alt.toFixed(2) + '°',
     'top ' + m(o.top_m) + '   gnd ' + m(o.ground_m) + '   h ' + m(o.height_m),
   ];
-  const F = ['600 12px', '11px', '11px'];
+  /* With a profile, say what the horizon in front of this object is and how
+     far away it is. That one line is the whole answer to "why is this tower
+     not there": Kuningasvuoren vesitorni, 51.7 km north, has its top at
+     -0.05 deg and reads "hor +0.33 at 0.7 km" -- Tahtitorninmaki, 690 m
+     away, is in the way. */
+  if (o.hor != null) {
+    const hd = hzDistAt(o.az, o.dist);
+    lines.push('hor ' + (o.hor >= 0 ? '+' : '') + o.hor.toFixed(2) + '°'
+      + (hd != null ? '  at ' + (hd / 1000).toFixed(1) + ' km' : '')
+      + (o.alt <= o.hor ? '   hidden' : ''));
+  }
+  const F = ['600 12px', '11px', '11px', '11px'];
   const FF = ' -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
   let bw = 0;
   lines.forEach((t, i) => { d.font = F[i] + FF; bw = Math.max(bw, d.measureText(t).width); });
   bw += 14;
-  const bh = 48, x0 = Math.max(4, w - bw - 6), y0 = RULER + 5;
+  const bh = 6 + 14 * lines.length, x0 = Math.max(4, w - bw - 6), y0 = RULER + 5;
 
   d.fillStyle = 'rgba(255,254,251,0.93)';
   d.fillRect(x0, y0, bw, bh);
@@ -934,6 +1147,27 @@ distDraw();
    nothing attached to it. */
 slider('minang', 'minang', v => v.toFixed(2) + '°', v => v / 60);
 
+/* Treeline. Off by default, and it has to be, because it is a guess applied
+   uniformly: there is no land-cover layer on the client, so ticking it adds
+   the same canopy to every land cell including fields, lakeshore rock and the
+   middle of Helsinki. What justifies having it at all is the measurement in
+   PLAN.md 12.3 -- DSM minus DTM over forested interior is 4.35 m at the
+   median, 21.4 m at p90, and three-quarters of Finland is forest -- and the
+   fact that 25 m of canopy subtends 0.29 deg at 5 km, the same angle as a
+   327 m mast at 41 km. For an observer standing in or behind forest the
+   treeline, not the terrain, is the horizon. Tick it to see how much of the
+   page's answer depends on that. */
+(function () {
+  const on = document.getElementById('canopy'), hm = document.getElementById('canopyh');
+  const upd = () => {
+    HZ.canopy = on.checked ? Math.max(0, Math.min(40, +hm.value || 0)) : 0;
+    hzRequest();
+    thint();
+  };
+  on.onchange = upd;
+  hm.onchange = upd;
+})();
+
 function syncInputs() {
   document.getElementById('olat').value = STATE.lat.toFixed(5);
   document.getElementById('olon').value = STATE.lon.toFixed(5);
@@ -965,10 +1199,11 @@ document.getElementById('head').onclick = e => {
  * axes as an alt-azimuth grid over a sky photograph, so the two can be
  * compared directly.
  *
- * No terrain yet. Every object here is drawn from closed-form geodesy,
- * which needs no DEM; what the missing terrain costs is occlusion (a
- * hill or a treeline in front of an object) and the land horizon line.
- * Both arrive with the ray-caster.
+ * Objects are drawn from closed-form geodesy and are never ray-cast:
+ * at 30 km a 3 m mast column subtends 20.6 arcseconds against a 0.1
+ * degree bin's 360, so a raster would either lose it or draw it 17x
+ * too wide. The terrain behind and in front of them is the ray-cast
+ * part, and it arrives from horizon.js as a 3600-bin profile.
  * ------------------------------------------------------------------ */
 
 const PANO = {
@@ -1013,12 +1248,23 @@ const dAz = (a, b) => ((a - b + 540) % 360) - 180;
    Either edge can be pinned by hand. */
 function fitAlt() {
   const half = PANO.span / 2;
-  const dip = Math.sqrt(2 * Math.max(0.5, STATE.eye) / REFF) * R2D;
+  const dip = dipDeg();
   let hi = null;
   for (const o of view) {
     if (o.alt == null) continue;
     if (Math.abs(dAz(o.az, PANO.ctr)) > half) continue;
     if (hi == null || o.alt > hi) hi = o.alt;
+  }
+  /* The land counts too, and it has to: a hill in the window is higher than
+     everything it hides, so fitting to objects alone would put the skyline
+     off the top of the strip with nothing under it. At Kaivopuisto this
+     changes nothing -- the whole profile spans -0.16 to +0.33 degrees -- but
+     an observer at the foot of a slope is a different picture. */
+  if (HZ.prof) {
+    for (let k = Math.floor((PANO.ctr - half) * 10); k <= Math.ceil((PANO.ctr + half) * 10); k++) {
+      const v = HZ.prof[((k % 3600) + 3600) % 3600];
+      if (hi == null || v > hi) hi = v;
+    }
   }
   if (PANO.topAuto) {
     PANO.altMax = hi == null ? 1.2 : Math.max(0.6, hi + Math.max(0.12, hi * 0.12));
@@ -1041,7 +1287,7 @@ function drawPano() {
   const Y = alt => h * (PANO.altMax - alt) / (PANO.altMax - PANO.altMin);
 
   const RULER = 20;                       // azimuth ruler band at the top
-  const dip = Math.sqrt(2 * Math.max(0.5, STATE.eye) / REFF) * R2D;
+  const dip = dipDeg();
 
   cx2.fillStyle = '#f7f6f3';              // sky is paper, not blue
   cx2.fillRect(0, 0, w, h);
@@ -1063,12 +1309,69 @@ function drawPano() {
   cx2.textBaseline = 'middle';
   const rng = PANO.altMax - PANO.altMin;
   const stepAlt = rng > 24 ? 10 : rng > 12 ? 5 : rng > 5 ? 1 : rng > 2 ? 0.5 : 0.2;
+  const gridY = [];
   for (let k = Math.ceil(PANO.altMin / stepAlt); k * stepAlt <= PANO.altMax; k++) {
     const a = k * stepAlt;
     if (Math.abs(a) < 1e-9) continue;
     const y = Y(a);
     if (y < RULER) continue;
     cx2.beginPath(); cx2.moveTo(0, y + 0.5); cx2.lineTo(w, y + 0.5); cx2.stroke();
+    gridY.push([a, y]);
+  }
+  /* The grid LINES stop at the land, because ground is opaque. The numbers
+     do not: they are chrome, you read the strip against them, and a hill in
+     the first 40 px of the window would otherwise take the whole left-hand
+     scale with it. So they are drawn after the silhouette, below. */
+
+  /* --- the land ---
+     The silhouette of the horizon profile, filled. It is drawn over the grid
+     and under everything else, because ground is opaque: a grid line showing
+     through a hill is the one thing that makes the strip read as a chart of
+     angles rather than a view.
+
+     Same warm grey-brown family as the ground shading it stands on, one step
+     darker, with its own edge. Identical to the sea tint it would vanish
+     into it, and the sea horizon is a different fact about the world: the
+     dashed line below is where the water ends, this is where the land does.
+
+     One pixel column can span several rays -- 120 degrees over 800 px is 1.5
+     bins per pixel -- so take the MAXIMUM over the bins a column covers.
+     Averaging them would shave every ridge crest, which is exactly the error
+     terrain.py fetches a finer level to avoid. */
+  if (HZ.prof) {
+    const perPx = PANO.span / w / 0.1;
+    const yClamp = y => y < -20 ? -20 : (y > h + 20 ? h + 20 : y);
+    cx2.beginPath();
+    cx2.moveTo(-1, h + 20);
+    for (let x = 0; x <= w; x++) {
+      const az = PANO.ctr + (x / w - 0.5) * PANO.span;
+      let a;
+      if (perPx > 1.05) {
+        const hw = PANO.span / w / 2;
+        a = -90;
+        for (let k = Math.floor((az - hw) / 0.1); k <= Math.ceil((az + hw) / 0.1); k++) {
+          const v = HZ.prof[((k % 3600) + 3600) % 3600];
+          if (v > a) a = v;
+        }
+      } else {
+        a = hzProf(az);
+      }
+      cx2.lineTo(x, yClamp(Y(a)));
+    }
+    cx2.lineTo(w + 1, h + 20);
+    cx2.closePath();
+    cx2.fillStyle = '#e6ded0';
+    cx2.fill();
+    cx2.strokeStyle = '#b9ad99';
+    cx2.lineWidth = 1;
+    cx2.stroke();
+  }
+
+  cx2.fillStyle = '#a89d8c';
+  cx2.font = '10px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  cx2.textAlign = 'left';
+  cx2.textBaseline = 'middle';
+  for (const [a, y] of gridY) {
     cx2.fillText((a > 0 ? '+' : '') + (stepAlt < 1 ? a.toFixed(1) : a) + '°', 3, y - 6);
   }
 
@@ -1096,26 +1399,28 @@ function drawPano() {
   const vis = view.filter(o => o.alt != null && Math.abs(dAz(o.az, PANO.ctr)) < half + 1);
   vis.sort((a, b) => a.dist - b.dist);                 // far behind near
 
-  /* What is dotted is what the EARTH hides, which is a question of distance,
-     not of elevation angle.
+  /* What is dotted is what is HIDDEN, and with a terrain profile that is
+     usually a hill rather than the Earth.
 
-     An object nearer than the horizon distance is wholly in front of the
-     bulge: you see it top to bottom, however far below eye level it sits, so
-     it is drawn solid all the way down. An object beyond the horizon distance
-     has its lower part cut off by the bulge, and that hidden part -- from the
-     grazing line at -dip down to where its base would otherwise appear -- is
-     the dotted, faint one. */
-  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, STATE.eye));
+     o.hor is the horizon at the object's own azimuth restricted to terrain
+     in front of it, so everything below it on that column is behind
+     something. It already contains the Earth's bulge: a ray over open water
+     maxes out at exactly -dip, which is the old test. Without a profile the
+     old test is all there is -- an object nearer than the horizon distance is
+     wholly in front of the bulge and drawn solid to its foot, one beyond it
+     is cut off at the grazing line. */
+  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, (ground || 0) + STATE.eye));
   for (const o of vis) {
     const x = X(o.az);
     const yt = Math.max(Y(o.alt), RULER);
     const yb = Math.min(Y(o.altBase != null ? o.altBase : 0), h);
-    const behind = o.dist > dHorizon;
-    const ySplit = behind ? Math.min(Math.max(yD, yt), yb) : yb;
+    const yHid = o.hor != null ? Y(o.hor) : (o.dist > dHorizon ? yD : 1e9);
+    const ySplit = Math.min(Math.max(yHid, yt), yb);
+    const buried = o.hor != null && o.alt <= o.hor;
     const col = distColor(o.dist / 1000);
     const selected = o.i === STATE.sel;
 
-    if (behind && yb > ySplit) {             // hidden below the Earth's bulge
+    if (yb > ySplit) {                       // the hidden part
       cx2.save();
       cx2.strokeStyle = col;
       cx2.globalAlpha = selected ? 0.45 : 0.22;
@@ -1127,15 +1432,18 @@ function drawPano() {
       cx2.stroke();
       cx2.restore();
     }
-    cx2.strokeStyle = col;
-    cx2.globalAlpha = selected ? 1 : 0.85;
-    cx2.lineWidth = selected ? 2.5 : 1.4;
-    cx2.beginPath();
-    cx2.moveTo(x, yt);
-    cx2.lineTo(x, ySplit);
-    cx2.stroke();
+    if (ySplit > yt) {
+      cx2.strokeStyle = col;
+      cx2.globalAlpha = selected ? 1 : 0.85;
+      cx2.lineWidth = selected ? 2.5 : 1.4;
+      cx2.beginPath();
+      cx2.moveTo(x, yt);
+      cx2.lineTo(x, ySplit);
+      cx2.stroke();
+    }
     // a cap at the top, which is the bit you actually match against a skyline
-    cx2.fillStyle = distColor(o.dist / 1000);
+    cx2.globalAlpha = buried ? (selected ? 0.5 : 0.25) : 1;
+    cx2.fillStyle = col;
     cx2.fillRect(x - 1.6, Math.max(yt, RULER) - 1.6, 3.2, 3.2);
     cx2.globalAlpha = 1;
   }
@@ -1152,7 +1460,7 @@ function drawPano() {
      it already knows the pixel geometry. The cap is only there to bound the
      work when a window holds thousands of objects. */
   const labelled = vis
-    .slice()
+    .filter(o => o.name || !NOLABEL.has(o.cat))
     .sort((a, b) => (b.name ? 1 : 0) - (a.name ? 1 : 0) || (b.ang || 0) - (a.ang || 0))
     .slice(0, 400);
 
@@ -1185,7 +1493,10 @@ function drawPano() {
     }
     taken.push({ x0: x - 2, x1: x + tw + 2, y });
     cx2.fillStyle = o.i === STATE.sel ? '#b4531d' : (o.name ? '#2b2723' : '#8a8072');
+    // an object the terrain hides keeps its name, at half weight
+    cx2.globalAlpha = (o.hor != null && o.alt <= o.hor) ? 0.45 : 1;
     cx2.fillText(txt, x + 3, y);
+    cx2.globalAlpha = 1;
   }
 
   /* --- azimuth ruler, drawn last so nothing overlaps it --- */
