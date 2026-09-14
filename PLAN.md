@@ -479,15 +479,6 @@ pixels: a Lapland clip maxes at 719.69 m where Ylläs is 718, and a whole-Finlan
   nodata, so handling is not uniform; use the GeoCubes `meri` mask to tell sea-nodata from a gap.
 - The GeoTIFFs declare no vertical datum. GeoKey 4096 is absent.
 
-Forest is the largest correctness risk. DSM − DTM over a forested interior block: median 4.35 m,
-p75 15.27 m, p90 21.37 m, 25.7% of cells above 15 m; Finland is three-quarters forest. In angular
-terms a 25 m spruce canopy subtends 2.86° at 500 m, 0.72° at 2 km and 0.29° at 5 km, while a 327 m
-mast at 41 km sits at 0.29° and a 150 m mast at 30 km at 0.17°. For any observer inside or behind
-forest the treeline at 2–5 km hides everything on the true horizon. Add the GeoCubes `pintamalli` or
-`ndsm` layer as an occlusion overlay, or add 20–25 m to forested land cover, which MTK supplies as
-`maastokuvio` polygons. This also cuts the other way for the observer: the page has to know whether
-the user is above the canopy.
-
 Mapterhorn already publishes Finland as terrarium tiles derived from this same 2 m model (its
 catalogue names "National Land Survey of Finland 2025, downloaded via GeoCubes", CC BY 4.0) at
 `https://tiles.mapterhorn.com/{z}/{x}/{y}.webp`, Estonia at 1 m. That reuses the PMTiles-over-Range
@@ -535,8 +526,8 @@ horizon from ordinary Helsinki high ground under ordinary refraction; no mirage 
 - From Harmaja, Vuosaarenhuippu, Malminkartanonhuippu or the Majakka roof, the 30 m observation-deck
   disc clears, subtending 1.2–1.5′ — at the naked-eye limit, easy in binoculars.
 - The ray from Kaivopuisto passes 16.6 m above the sea at 7.66 km, between Katajaluoto and Harmaja.
-  Curvature is not the occluder for the Helsinki case; Finnish islets, their trees and their beacons
-  are. This is why the Finnish side needs a real terrain-and-object sweep, not a curvature test.
+  Curvature is not the occluder for the Helsinki case; Finnish islets and their beacons are. This is
+  why the Finnish side needs a real terrain-and-object sweep, not a curvature test.
 - The better vantage point is Porkkala. From Rönnskär (25 m) the Teletorn is 55.82 km at azimuth
   150.518°, tip +0.1032° above horizontal, 246 m of tower visible subtending 15.17′.
 
@@ -1299,11 +1290,7 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
    a building polygon instead of a `vesitorni` point. This turned out to matter less than expected:
    the surface model heights all 420 `vesitorni` points directly, so the class is usable either way.
    Whether the biggest examples are still missing entirely remains unmeasured.
-
-3. **Forest occlusion in practice.** The p90 DSM−DTM gap is 21.4 m. Whether a canopy term improves
-   the felt accuracy or just removes objects that are actually visible — a mast top pokes over the
-   trees the whole way — needs a field test.
-5. **The 60–100 m tier.** The register holds everything above 60 m nationwide while the published
+3. **The 60–100 m tier.** The register holds everything above 60 m nationwide while the published
    extract cuts at 100 m, so a tier of water towers and chimneys exists and is not on the website.
    Requests go through Fintraffic's *selvityspyyntö lentoesteestä* web form at 204 EUR + VAT per
    obstacle — a per-object price, so almost certainly not worth it. The useful part of asking would

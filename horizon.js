@@ -281,7 +281,6 @@ async function sweep(msg) {
   if (ground == null) throw new Error('no terrain tile covers the observer');
 
   const hobs = ground + msg.eye;
-  const canopy = msg.canopy > 0 ? msg.canopy : 0;
 
   /* The sea horizon for this eye height, and the reason the far rings can be
      thrown away wholesale: terrain that cannot reach this angle cannot reach
@@ -344,7 +343,7 @@ async function sweep(msg) {
            fetch. At 60 km the refracted drop is 246 m, so a tile topping out
            at 40 m cannot show above a 39 m eye's sea horizon and is 250 kB
            that never needs to cross the wire. */
-        if (dn > SKIP_MIN_M && bestTan(meta[2] + canopy, hobs, dn, df) < dipTan) {
+        if (dn > SKIP_MIN_M && bestTan(meta[2], hobs, dn, df) < dipTan) {
           skipped++;
           continue;
         }
@@ -399,7 +398,7 @@ async function sweep(msg) {
          edge. If that is under the running maximum the segment cannot change
          it. On a clear ray this throws away most of the 90 km tail. */
       if (tanmax > -1e8
-        && bestTan(Math.max(blk.maxm + canopy, 0), hobs, D[i0], D[i1 - 1]) < tanmax) {
+        && bestTan(Math.max(blk.maxm, 0), hobs, D[i0], D[i1 - 1]) < tanmax) {
         continue;                     // 0 m sea is still terrain, hence the max
       }
 
@@ -428,10 +427,7 @@ async function sweep(msg) {
         }
         if (cv !== null) {
           const v = cv[((con - n) * invCell | 0) * cw + ((e - coe) * invCell | 0)];
-          if (v !== NODATA) {                     // nodata is sea or abroad: 0 m
-            h = v;
-            if (canopy && h > 0.5) h += canopy;
-          }
+          if (v !== NODATA) h = v;                // nodata is sea or abroad: 0 m
         }
         if (h > hobs + C[i] + d * tanmax) {
           tanmax = (h - hobs - C[i]) / d;

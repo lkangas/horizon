@@ -310,13 +310,7 @@
 
     <div class="field">
       <label class="cap">Terrain</label>
-      <div class="row">
-        <label class="chk"><input type="checkbox" id="canopy"> Treeline</label>
-        <input type="number" id="canopyh" value="15" step="1" min="0" max="40"
-               title="canopy height added to every land cell, metres" style="width:58px">
-        <span class="val" style="min-width:0;flex:1;text-align:left">m on land</span>
-      </div>
-      <div class="hint" id="thint">&nbsp;</div>
+      <div class="hint" id="thint" style="margin-top:0">&nbsp;</div>
     </div>
 
     <div class="field">
@@ -649,11 +643,11 @@ const HZ = {
   key: null, posKey: null, pending: null, fetching: null, t0: 0, wall: 0,
   ground: null, groundSrc: null,
   prof: null, profD: null, off: null, stD: null, stA: null,
-  stats: null, canopy: 0, hidden: 0
+  stats: null, hidden: 0
 };
 
 const hzPos = () => STATE.lat.toFixed(6) + '/' + STATE.lon.toFixed(6);
-const hzKey = () => hzPos() + '/' + STATE.eye + '/' + HZ.canopy;
+const hzKey = () => hzPos() + '/' + STATE.eye;
 
 try {
   HZ.worker = new Worker('horizon.js');
@@ -711,7 +705,7 @@ function hzRequest() {
     HZ.err = null;
     HZ.t0 = performance.now();
     HZ.worker.postMessage({
-      id: key, lat: STATE.lat, lon: STATE.lon, eye: STATE.eye, canopy: HZ.canopy
+      id: key, lat: STATE.lat, lon: STATE.lon, eye: STATE.eye
     });
     thint();
   }, 180);
@@ -1146,27 +1140,6 @@ distDraw();
    control replaced the two range inputs, which left the slider moving with
    nothing attached to it. */
 slider('minang', 'minang', v => v.toFixed(2) + '°', v => v / 60);
-
-/* Treeline. Off by default, and it has to be, because it is a guess applied
-   uniformly: there is no land-cover layer on the client, so ticking it adds
-   the same canopy to every land cell including fields, lakeshore rock and the
-   middle of Helsinki. What justifies having it at all is the measurement in
-   PLAN.md 12.3 -- DSM minus DTM over forested interior is 4.35 m at the
-   median, 21.4 m at p90, and three-quarters of Finland is forest -- and the
-   fact that 25 m of canopy subtends 0.29 deg at 5 km, the same angle as a
-   327 m mast at 41 km. For an observer standing in or behind forest the
-   treeline, not the terrain, is the horizon. Tick it to see how much of the
-   page's answer depends on that. */
-(function () {
-  const on = document.getElementById('canopy'), hm = document.getElementById('canopyh');
-  const upd = () => {
-    HZ.canopy = on.checked ? Math.max(0, Math.min(40, +hm.value || 0)) : 0;
-    hzRequest();
-    thint();
-  };
-  on.onchange = upd;
-  hm.onchange = upd;
-})();
 
 function syncInputs() {
   document.getElementById('olat').value = STATE.lat.toFixed(5);
