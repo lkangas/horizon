@@ -1203,14 +1203,26 @@ map, observer pin, horizon strip and a sortable azimuth table. The strip draws o
 azimuth and elevation are closed-form, so no DEM is needed. What the missing terrain costs is
 occlusion and the land horizon line, both of which arrive with the ray-caster.
 
-**v1 — terrain.** Ring streaming, the profile kernel, occlusion against the profile, the land
-horizon line under the objects, silhouette rectangles, refraction states.
+**v1 — terrain.** *(not started, and now the largest gap)* Ring streaming, the profile kernel,
+occlusion against the profile, the land horizon line under the objects, silhouette rectangles,
+refraction states. Without it, objects standing on high ground hang in the air with nothing beneath
+them, nothing is ever hidden by an intervening hill, and the observer's own ground elevation is
+guessed from the median base elevation of nearby objects rather than looked up.
 
-**v2 — mobile.** The sticky-panorama strip, saved viewpoints, wake lock, the install-then-download
-offline flow. The hamburger drawer and the table sheet already exist.
+**v2 — mobile.** *(part built)* The hamburger drawer, the table sheet, the sticky strip, browser
+geolocation and HTTPS for a phone are done. Saved viewpoints, wake lock and the
+install-then-download offline flow are not.
 
-**v3 — coast and Estonia.** Islands as azimuth spans, Väylävirasto lighthouses and `Reunamerkki`,
-Estonia — leading with Porkkala → Teletorn and Jussarö → Pakri rather than the Helsinki version.
+**v3 — coast, hills and Estonia.** *(not started)* Named hills from Nimistö (§3.9), islands as
+azimuth spans (§3.5), Väylävirasto lighthouses and `Reunamerkki` — the 163 lighthouses currently in
+the catalogue are OSM-only, with 130 heights and no focal planes — and Estonia, leading with
+Porkkala → Teletorn and Jussarö → Pakri rather than the Helsinki version.
+
+**Also outstanding, not tied to a phase.** Names: only 1,429 of 20,834 objects have one, and the
+rest fall back to the category word. Wikidata is CC0 and would cleanly name a few hundred
+landmarks; MTK's `selite` layer has more but lives in the 5.3 GB `MTK-muut` package. And the
+payload is 556 KB gzipped against the ~100 KB §2 predicted, because every object ships as verbose
+JSON with no tiering or columnar encoding.
 
 **Deferred.** The 60–100 m obstacle tier. Paid 5 pts/m² lidar for objects nDSM leaves
 uncertain. The KMTK migration: MML says production files and API arrive autumn 2026, and it moves
@@ -1257,14 +1269,12 @@ heights onto the objects as `Absoluuttinen korkeus` (N2000) and adds a real `Tor
    inverts on the Koli pair, so it cannot be the discriminator. Possibly: a Kohouma whose snapped
    maximum belongs to another Kohouma is a massif, and should label a span of azimuth rather than a
    point.
-2. **Water towers filed as buildings.** MML's catalogue says a >500 m² water tower may be stored as a
-   building polygon. How many actually are, and whether coordinate-matching `Vesitornin selite`
-   (45802) against footprints recovers them, is unmeasured.
-3. **Water towers hiding in buildings** turned out not to matter much in the end: the surface
-   model heights every one of the 420 `vesitorni` points directly, so the class is complete whether
-   or not the biggest examples are also filed as building polygons.
+2. **Water towers filed as buildings.** MML's catalogue says a >500 m² water tower may be stored as
+   a building polygon instead of a `vesitorni` point. This turned out to matter less than expected:
+   the surface model heights all 420 `vesitorni` points directly, so the class is usable either way.
+   Whether the biggest examples are still missing entirely remains unmeasured.
 
-4. **Forest occlusion in practice.** The p90 DSM−DTM gap is 21.4 m. Whether a canopy term improves
+3. **Forest occlusion in practice.** The p90 DSM−DTM gap is 21.4 m. Whether a canopy term improves
    the felt accuracy or just removes objects that are actually visible — a mast top pokes over the
    trees the whole way — needs a field test.
 5. **The 60–100 m tier.** The register holds everything above 60 m nationwide while the published

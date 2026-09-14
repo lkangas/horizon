@@ -116,10 +116,12 @@
   .disclose[aria-expanded="true"]::after { content: " ▾"; }
   .disclose:hover { color: var(--ink); }
   .vsrow {
-    display: grid; grid-template-columns: 52px 1fr auto; gap: 8px;
+    display: grid; grid-template-columns: 46px 1fr 48px auto; gap: 7px;
     align-items: center; margin-top: 7px; font-size: 12.5px; color: var(--dim);
   }
-  .vsrow input[type=number] { width: 100%; }
+  .vsrow input[type=range] { width: 100%; accent-color: var(--accent); }
+  .vsrow input:disabled { opacity: 0.45; }
+  .vsval { font-variant-numeric: tabular-nums; text-align: right; }
   .chk { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
   .chk input { accent-color: var(--accent); }
   .rng { float: right; text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; color: var(--dim); }
@@ -340,12 +342,14 @@
       <div id="vs" hidden>
         <div class="vsrow">
           <span>Top</span>
-          <input type="number" id="alttop" step="0.5">
+          <input type="range" id="alttop" min="0" max="1000" step="1">
+          <span class="vsval" id="alttop-val">&nbsp;</span>
           <label class="chk"><input type="checkbox" id="alttopauto" checked> Auto</label>
         </div>
         <div class="vsrow">
           <span>Bottom</span>
-          <input type="number" id="altbot" step="0.5">
+          <input type="range" id="altbot" min="0" max="1000" step="1">
+          <span class="vsval" id="altbot-val">&nbsp;</span>
           <label class="chk"><input type="checkbox" id="altbotauto" checked> Auto</label>
         </div>
       </div>
@@ -1339,34 +1343,59 @@ function syncRay() {
 }
 
 
-/* Vertical scale, collapsed by default. Auto is the norm; the manual boxes
+/* Vertical scale, collapsed by default. Auto is the norm; the manual controls
    exist for the case auto cannot serve -- a near mast at 20 degrees and a
-   distant skyline at 0.2 cannot share a sensible automatic range. */
+   distant skyline at 0.2 cannot share one sensible automatic range.
+
+   Both sliders are logarithmic. Nearly all the use is between 0.5 and 3
+   degrees, but a mast a few hundred metres away needs 20 or more, and a linear
+   sweep over that range would put the whole useful part in the first tenth of
+   the travel. */
 (function () {
   const btn = document.getElementById('vs-toggle');
   const box = document.getElementById('vs');
   const top = document.getElementById('alttop'), bot = document.getElementById('altbot');
   const topA = document.getElementById('alttopauto'), botA = document.getElementById('altbotauto');
+  const topV = document.getElementById('alttop-val'), botV = document.getElementById('altbot-val');
+
+  const TOP_LO = 0.2, TOP_HI = 60, BOT_LO = 0.1, BOT_HI = 20;
+  const logTo = (t, lo, hi) => lo * Math.pow(hi / lo, t);
+  const logFrom = (v, lo, hi) =>
+    Math.log(Math.min(hi, Math.max(lo, v)) / lo) / Math.log(hi / lo);
+  const show = v => (Math.abs(v) < 10 ? v.toFixed(2) : v.toFixed(0)) + '°';
 
   btn.onclick = () => {
     const open = box.hidden;
     box.hidden = !open;
     btn.setAttribute('aria-expanded', String(open));
-    if (open) showValues();
+    if (open) sync();
   };
-  function showValues() {
-    if (topA.checked) top.value = PANO.altMax.toFixed(2);
-    if (botA.checked) bot.value = PANO.altMin.toFixed(2);
+
+  function sync() {
     top.disabled = topA.checked;
     bot.disabled = botA.checked;
+    top.value = Math.round(logFrom(PANO.altMax, TOP_LO, TOP_HI) * 1000);
+    bot.value = Math.round(logFrom(-PANO.altMin, BOT_LO, BOT_HI) * 1000);
+    topV.textContent = show(PANO.altMax);
+    botV.textContent = show(PANO.altMin);
   }
-  PANO.onScale = showValues;
+  PANO.onScale = () => { if (!box.hidden) sync(); };
 
-  topA.onchange = () => { PANO.topAuto = topA.checked; if (!topA.checked) PANO.altMax = parseFloat(top.value); showValues(); drawPano(); };
-  botA.onchange = () => { PANO.botAuto = botA.checked; if (!botA.checked) PANO.altMin = parseFloat(bot.value); showValues(); drawPano(); };
-  top.oninput = () => { const v = parseFloat(top.value); if (isFinite(v)) { PANO.topAuto = false; topA.checked = false; PANO.altMax = v; showValues(); drawPano(); } };
-  bot.oninput = () => { const v = parseFloat(bot.value); if (isFinite(v)) { PANO.botAuto = false; botA.checked = false; PANO.altMin = v; showValues(); drawPano(); } };
-  showValues();
+  topA.onchange = () => { PANO.topAuto = topA.checked; sync(); drawPano(); };
+  botA.onchange = () => { PANO.botAuto = botA.checked; sync(); drawPano(); };
+  top.oninput = () => {
+    PANO.topAuto = false; topA.checked = false;
+    PANO.altMax = logTo(+top.value / 1000, TOP_LO, TOP_HI);
+    if (PANO.altMax - PANO.altMin < 0.15) PANO.altMin = PANO.altMax - 0.15;
+    sync(); drawPano();
+  };
+  bot.oninput = () => {
+    PANO.botAuto = false; botA.checked = false;
+    PANO.altMin = -logTo(+bot.value / 1000, BOT_LO, BOT_HI);
+    if (PANO.altMax - PANO.altMin < 0.15) PANO.altMax = PANO.altMin + 0.15;
+    sync(); drawPano();
+  };
+  sync();
 })();
 
 /* Hamburger. Mobile only -- on desktop the panel is always there. */
