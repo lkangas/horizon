@@ -337,13 +337,12 @@
       </div>
     </div>
 
-    <div class="field">
+    <div class="field" id="tfield" hidden>
       <label class="cap">Terrain</label>
       <div class="hint" id="thint" style="margin-top:0">&nbsp;</div>
     </div>
 
     <div class="field">
-      <label class="cap">Show</label>
       <div class="seg" id="seg-cat">
         <button data-v="all" aria-pressed="true">All</button>
         <button data-v="mast" aria-pressed="false">Masts</button>
@@ -487,7 +486,8 @@ const fmt = (n, p) => n == null ? '–' : n.toFixed(p == null ? 1 : p);
    how the locate button knows whether its fix is still the one in use. */
 const STATE = {
   lat: 60.15530, lon: 24.95350, eye: 20, dem: null, demAt: null, fixAt: null,
-  cat: 'all', mind: 0, maxd: 60, minang: 0.15, vis: 'horizon',
+  cat: new Set(['mast', 'chimney', 'turbine', 'tower']),
+  mind: 0, maxd: 60, minang: 0.15, vis: 'horizon',
   sort: 'az', sel: null
 };
 const MAX_ROWS = 500;
@@ -508,6 +508,12 @@ const CATLABEL = {
   obstower: 'tower', belltower: 'bell tower', lighthouse: 'lighthouse', building: 'building'
 };
 const TOWERISH = new Set(['obstower', 'watertower', 'belltower', 'lighthouse', 'building']);
+/* The four selectable keys cover all eight object categories between them,
+   because TOWERISH folds obstower, watertower, belltower, lighthouse and
+   building into one "tower" key. So the full selection and no filter at all
+   are the same thing, and the empty selection shows nothing. */
+const CATS = ['mast', 'chimney', 'turbine', 'tower'];
+const catKey = c => TOWERISH.has(c) ? 'tower' : c;
 /* Categories whose generic fallback label is not worth the pixels in the
    horizon strip. "building" against a skyline of buildings says nothing, and
    unnamed buildings outnumber every other category put together, so they were
@@ -732,6 +738,7 @@ try {
     HZ.pending = null; HZ.fetching = null;
     if (!m.ok) {
       HZ.err = m.error; HZ.prof = null; HZ.key = null; HZ.failed = m.id;
+      HZ.stats = null;
       thint(); recompute();
       return;
     }
@@ -838,15 +845,20 @@ function hzProf(az) {
 }
 
 function thint() {
-  const el = document.getElementById('thint');
-  if (!el) return;
-  if (HZ.err && !HZ.prof) { el.textContent = 'no terrain — ' + HZ.err; return; }
+  const el = document.getElementById('thint'), field = document.getElementById('tfield');
+  if (!el || !field) return;
+  /* The field appears only while the ray-caster has something to report.
+     Announcing the absence of terrain is not worth a caption and a line: where
+     no tiles are published it would sit there saying so permanently, and where
+     they are it says nothing until the first sweep returns anyway. */
+  const show = !!(HZ.fetching || HZ.pending || HZ.stats);
+  field.hidden = !show;
+  if (!show) return;
   if (HZ.fetching) {
     el.textContent = 'terrain tiles ' + HZ.fetching[0] + '/' + HZ.fetching[1] + '…';
     return;
   }
   if (HZ.pending) { el.textContent = 'sweeping the horizon…'; return; }
-  if (!HZ.stats) { el.innerHTML = '&nbsp;'; return; }
   const s = HZ.stats;
   el.innerHTML = '3,600 rays &middot; <b>' + Math.round(s.msSweep) + ' ms</b> sweep, ' +
     Math.round(s.msFetch) + ' ms tiles &middot; ' + s.tiles + ' tiles' +
@@ -926,9 +938,7 @@ function recompute() {
 }
 
 function pass(o) {
-  if (STATE.cat !== 'all') {
-    if (STATE.cat === 'tower' ? !TOWERISH.has(o.cat) : o.cat !== STATE.cat) return false;
-  }
+  if (!STATE.cat.has(catKey(o.cat))) return false;
   if (STATE.vis === 'named' && !o.name) return false;
   if (STATE.vis === 'horizon' && o.above === false) return false;
   if (STATE.minang > 0) {
@@ -1110,8 +1120,35 @@ function seg(id, key, cast) {
     recompute();
   };
 }
-seg('seg-cat', 'cat');
 seg('seg-vis', 'vis');
+
+/* Categories are a multi-select, unlike the single-choice segments seg()
+   drives. Each button toggles its own key; All is a shortcut to everything or
+   nothing, and reads as pressed exactly when everything is chosen. */
+const catBox = document.getElementById('seg-cat');
+function paintCats() {
+  for (const b of catBox.querySelectorAll('button')) {
+    const v = b.dataset.v;
+    b.setAttribute('aria-pressed', String(
+      v === 'all' ? CATS.every(c => STATE.cat.has(c)) : STATE.cat.has(v)));
+  }
+}
+catBox.onclick = e => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const v = b.dataset.v;
+  if (v === 'all') {
+    if (CATS.every(c => STATE.cat.has(c))) STATE.cat.clear();
+    else for (const c of CATS) STATE.cat.add(c);
+  } else if (STATE.cat.has(v)) {
+    STATE.cat.delete(v);
+  } else {
+    STATE.cat.add(v);
+  }
+  paintCats();
+  recompute();
+};
+paintCats();
 
 function slider(id, key, fmtv, cast) {
   const el = document.getElementById(id), out = document.getElementById(id + '-val');
