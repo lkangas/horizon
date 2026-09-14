@@ -29,7 +29,7 @@ DecompressionStream('deflate') and nothing else.
      16     2  uint16   cell_m       -- cell size in metres, square
      18     2  uint16   width        -- columns
      20     2  uint16   height       -- rows
-     22     2  int16    scale        -- metres = stored / scale; 1 here
+     22     2  int16    scale        -- metres = stored / scale; 10 here
      24     2  int16    nodata       -- -32768
      26     1  uint8    compression  -- 1 = deflate, RFC 1950 (zlib wrapper)
      27     1  uint8    flags        -- bit0: values are a max over a finer
@@ -195,7 +195,21 @@ MAGIC = b"AZT1"
 HDR = 36
 HFMT = "<4sHBBiiHHHhhBBIhh"
 NODATA = -32768
-SCALE = 1                      # stored int16 is metres; see the docstring
+# Stored int16 is QUARTER-METRES. Whole metres were the first choice and are
+# visibly too coarse: one metre subtends 0.057 deg at 1 km and 0.019 deg at
+# 3 km, so a near hillside came out as a staircase of rectangular steps.
+#
+# Decimetres were the obvious answer and are the wrong trade. Measured over
+# three tiles at 10, 20 and 50 m, going to decimetres costs +97% to +141% in
+# size because the predictor's deltas grow with the scale, while quarter
+# metres cost +57% to +77%. Two things make the extra precision worthless:
+# the source model's own vertical accuracy is about 0.3 m, so finer than a
+# quarter metre is recording noise, and the client max-pools to 10-100 m
+# cells where within-cell relief dominates anyway. Tiles are fetched over
+# mobile, so the size is not free.
+#
+# int16 quarter-metres reach +-8191 m against Finland's 1324 m summit.
+SCALE = 4
 
 # GeoCubes' own grid anchor, so tiles are shared between observers.
 GRID_E0 = 0
@@ -600,7 +614,14 @@ def write_index(rings=RINGS, report=None):
             p = os.path.join(d, fn)
             with open(p, "rb") as f:
                 m = tile_meta(f.read(HDR))
-            here[fn[:-4]] = [os.path.getsize(p), m["min_m"], m["max_m"]]
+            # Converted out of stored units here, so the index is always
+            # metres. horizon.js reads max_m straight out of it to decide
+            # whether a tile can be skipped, and it has no business
+            # knowing the storage scale.
+            sc = float(m["scale"] or 1)
+            here[fn[:-4]] = [os.path.getsize(p),
+                             round(m["min_m"] / sc, 1),
+                             round(m["max_m"] / sc, 1)]
         if here:
             tiles[str(cell_m)] = here
     idx = dict(format="AZT1", crs="EPSG:3067", vdatum="N2000",

@@ -430,6 +430,7 @@ async function sweep(msg) {
          every sample. */
       const step = blk.step;
       let cx0 = 1, cx1 = -1, cy0 = 1, cy1 = -1, cv = null, cw = 0, coe = 0, con = 0;
+      let cch = 0, cs = 1;
       for (let i = i0; i < i1; i++) {
         const d = D[i];
         const e = e0 + ue * d, n = n0 + un * d;
@@ -440,11 +441,47 @@ async function sweep(msg) {
           cy1 = GRID_N0 - gy * step; cy0 = cy1 - step;
           const tx = gx - tx0, ty = gy - ty0;
           const t = (tx >= 0 && tx < nx && ty >= 0 && ty < ny) ? arr[ty * nx + tx] : null;
-          if (t) { cv = t.v; cw = t.w; coe = t.oe; con = t.on; } else { cv = null; }
+          if (t) { cv = t.v; cw = t.w; cch = t.h; coe = t.oe; con = t.on;
+                   cs = 1 / (t.scale || 1); } else { cv = null; }
         }
         if (cv !== null) {
-          const v = cv[((con - n) * invCell | 0) * cw + ((e - coe) * invCell | 0)];
-          if (v !== NODATA) h = v;                // nodata is sea or abroad: 0 m
+          /* Bilinear between cell CENTRES, hence the half-cell shift. Nearest
+             neighbour made the stored quantum visible as terracing -- at a
+             quarter metre that is 0.014 deg at 1 km, and a near hillside came
+             out as steps rather than a slope.
+
+             Interpolating does soften the max-pooling that the 10 m level
+             relies on to guarantee a ridge is never shaved. The softening is
+             bounded by the difference between neighbouring pooled cells and
+             only applies between them, never below the lower of the two, so
+             the skyline can sit at most half a cell's relief lower than the
+             pooled grid claims. That is the price of not terracing.
+
+             At a tile edge there is no neighbour to interpolate towards, so
+             the index clamps and the sample degrades to nearest. Tiles are
+             256 or 512 cells across, so that is a thin seam. */
+          const fx = (e - coe) * invCell - 0.5, fy = (con - n) * invCell - 0.5;
+          let ix = fx | 0, iy = fy | 0;
+          if (fx < 0) ix = 0;
+          if (fy < 0) iy = 0;
+          if (ix > cw - 2) ix = cw - 2;
+          if (iy > cch - 2) iy = cch - 2;
+          const r0 = iy * cw, r1 = r0 + cw;
+          const a00 = cv[r0 + ix], a10 = cv[r0 + ix + 1];
+          const a01 = cv[r1 + ix], a11 = cv[r1 + ix + 1];
+          if (a00 !== NODATA && a10 !== NODATA && a01 !== NODATA && a11 !== NODATA) {
+            let gx = fx - ix, gy = fy - iy;
+            if (gx < 0) gx = 0; else if (gx > 1) gx = 1;
+            if (gy < 0) gy = 0; else if (gy > 1) gy = 1;
+            const t0 = a00 + (a10 - a00) * gx;
+            const t1 = a01 + (a11 - a01) * gx;
+            h = (t0 + (t1 - t0) * gy) * cs;
+          } else {
+            /* A nodata corner must not be blended in -- it is sea or foreign
+               ground, not a height -- so fall back to the cell itself. */
+            const v = cv[((con - n) * invCell | 0) * cw + ((e - coe) * invCell | 0)];
+            if (v !== NODATA) h = v * cs;
+          }
         }
         if (h > hobs + C[i] + d * tanmax) {
           tanmax = (h - hobs - C[i]) / d;
