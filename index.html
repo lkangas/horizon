@@ -687,6 +687,15 @@ const HZ = {
   stats: null, hidden: 0
 };
 
+/* Where the elevation tiles are served from. Empty means the same origin as
+   the page, which is what a local server gives you and what the worker assumes
+   on its own. A deployment that keeps them elsewhere -- they run to about a
+   gigabyte across roughly 19,000 files, which is object storage rather than
+   static-site hosting -- sets this to that origin's base URL at deploy time.
+   Deliberately not baked in: this repo describes how to build the thing, not
+   where any one copy of it runs. */
+const TERRAIN_BASE = '';
+
 const hzPos = () => STATE.lat.toFixed(6) + '/' + STATE.lon.toFixed(6);
 /* Four fields, always four, so splitting on the slash stays unambiguous: the
    two coordinates, the eye height, and the DEM override or "-" for none. The
@@ -797,6 +806,7 @@ function hzRequest() {
     const dem = demTyped();
     const msg = { id: key, lat: STATE.lat, lon: STATE.lon, eye: STATE.eye };
     if (dem != null) msg.ground = dem;
+    if (TERRAIN_BASE) msg.base = TERRAIN_BASE;
     HZ.worker.postMessage(msg);
     thint();
   }, 180);
