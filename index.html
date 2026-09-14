@@ -92,6 +92,22 @@
   .btn.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
   .obs { display: grid; grid-template-columns: 1fr 1fr 92px; gap: 7px; }
   .hint { font-size: 11.5px; color: var(--dim); margin-top: 5px; }
+  /* A two-thumb range. Native <input type=range> has one thumb, and the usual
+     trick of stacking two and fighting ::-webkit-slider-thumb pointer-events
+     is fragile on touch, so this is a small custom control. */
+  .dual { position: relative; height: 20px; margin: 2px 0 0; touch-action: none; }
+  .dtrack, .dfill {
+    position: absolute; top: 8px; height: 4px; border-radius: 2px;
+  }
+  .dtrack { left: 0; right: 0; background: var(--line); }
+  .dfill { background: var(--accent); }
+  .dthumb {
+    position: absolute; top: 3px; width: 14px; height: 14px; margin-left: -7px;
+    border-radius: 50%; background: var(--accent);
+    border: 2px solid var(--panel);
+    cursor: ew-resize; outline: none;
+  }
+  .dthumb:focus-visible { box-shadow: 0 0 0 2px var(--accent-soft); }
   .rng { float: right; text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; color: var(--dim); }
   .hint b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
 
@@ -289,8 +305,12 @@
 
     <div class="field">
       <label class="cap">Distance <span id="dist-val" class="rng">0 &ndash; 60 km</span></label>
-      <div class="row"><input type="range" id="mind" min="0" max="80" step="1" value="0"></div>
-      <div class="row"><input type="range" id="maxd" min="5" max="150" step="5" value="60"></div>
+      <div class="dual" id="dist">
+        <div class="dtrack"></div>
+        <div class="dfill" id="dfill"></div>
+        <div class="dthumb" id="dlo" tabindex="0" role="slider" aria-label="Minimum distance"></div>
+        <div class="dthumb" id="dhi" tabindex="0" role="slider" aria-label="Maximum distance"></div>
+      </div>
     </div>
 
     <div class="field">
@@ -805,119 +825,74 @@ function slider(id, key, fmtv, cast) {
   el.oninput = () => { upd(); recompute(); };
   upd();
 }
-/* Two thumbs, one readout. A near cut-off matters because the foreground is
-   where the clutter is: at 1 km a 30 m shed subtends 1.7 degrees and buries a
-   327 m mast 40 km behind it. */
+/* Distance, as one control with two thumbs.
+   A near cut-off matters because the foreground is where the clutter is: at
+   1 km a 30 m shed subtends 1.7 degrees and buries a 327 m mast 40 km behind
+   it. Both thumbs share one squared axis, so the first few kilometres -- the
+   part actually worth trimming -- get most of the travel, and the far end
+   stays coarse where nothing needs excluding. */
+const DMAX = 150;
+const t2km = t => { const v = DMAX * t * t; return v < 10 ? Math.round(v * 10) / 10 : Math.round(v); };
+const km2t = km => Math.sqrt(Math.max(0, km) / DMAX);
 const fmtKm = v => v < 10 ? v.toFixed(1) : String(Math.round(v));
-function distLabel() {
+
+const dual = document.getElementById('dist');
+const dfill = document.getElementById('dfill');
+const dlo = document.getElementById('dlo');
+const dhi = document.getElementById('dhi');
+
+function distDraw() {
+  const lo = km2t(STATE.mind) * 100, hi = km2t(STATE.maxd) * 100;
+  dlo.style.left = lo + '%';
+  dhi.style.left = hi + '%';
+  dfill.style.left = lo + '%';
+  dfill.style.width = (hi - lo) + '%';
   document.getElementById('dist-val').textContent =
-    (STATE.mind ? fmtKm(STATE.mind) : '0') + ' – ' + STATE.maxd + ' km';
+    (STATE.mind ? fmtKm(STATE.mind) : '0') + ' – ' + fmtKm(STATE.maxd) + ' km';
+  for (const [el, v] of [[dlo, STATE.mind], [dhi, STATE.maxd]]) {
+    el.setAttribute('aria-valuenow', String(v));
+    el.setAttribute('aria-valuetext', fmtKm(v) + ' km');
+  }
 }
 
-/* The near slider is squared, so the first few kilometres -- the part actually
-   worth trimming -- get most of the travel. */
-const MIND_MAX = 25;
-const minEl = document.getElementById('mind');
-const maxEl = document.getElementById('maxd');
-minEl.oninput = () => {
-  const t = +minEl.value / +minEl.max;
-  STATE.mind = Math.min(Math.round(t * t * MIND_MAX * 10) / 10, STATE.maxd - 1);
-  distLabel(); recompute();
-};
-maxEl.oninput = () => {
-  STATE.maxd = +maxEl.value;
-  if (STATE.mind > STATE.maxd - 1) STATE.mind = Math.max(0, STATE.maxd - 1);
-  distLabel(); recompute();
-};
-distLabel();
-slider('minang', 'minang', v => v.toFixed(2) + '°', v => v / 60);
-
-/* Geolocation.
- *
- * Position only. The compass is deliberately absent (PLAN.md 11.1) but knowing
- * WHERE you are is a different problem from knowing which way you face, and on
- * a phone typing coordinates is miserable.
- *
- * Three things this deliberately does not do:
- *  - it never reads coords.altitude. The W3C spec says ellipsoidal, Android
- *    obeys, and WebKit returns CLLocation.altitude, which Apple documents as
- *    mean sea level. The two platforms therefore disagree by the geoid
- *    separation, 17.6 m in Helsinki. Eye height stays a typed number.
- *  - it does not treat coords.accuracy as a standard deviation. The spec
- *    defines it as a 95% radius, so it is roughly 2 sigma.
- *  - it does not watch continuously by default. You stand still on a tower,
- *    and a watch costs battery for nothing.
- */
-const locBtn = document.getElementById('locate');
-const accOut = document.getElementById('acc');
-let watchId = null;
-
-function showAccuracy(m) {
-  /* Position error matters most for NEAR objects: it is an angle divided by
-     range, so 10 m is 0.57 deg at 1 km and 0.01 deg at 50 km. Quote the range
-     inside which this fix is the dominant error rather than a bare radius. */
-  const rms = m / 2;                       // 95% radius -> ~1 sigma
-  const km = (rms / Math.tan(0.1 * D2R)) / 1000;
-  accOut.innerHTML = '±' + Math.round(m) + ' m (95%) — dominates inside ~'
-    + (km < 10 ? km.toFixed(1) : Math.round(km)) + ' km';
-}
-
-function gotPosition(pos) {
-  STATE.lat = pos.coords.latitude;
-  STATE.lon = pos.coords.longitude;
-  syncInputs();
-  marker.setLngLat([STATE.lon, STATE.lat]);
-  map.easeTo({ center: [STATE.lon, STATE.lat], zoom: Math.max(map.getZoom(), 11) });
-  showAccuracy(pos.coords.accuracy);
-  locBtn.removeAttribute('aria-busy');
-  locBtn.textContent = watchId != null ? 'Following…' : 'Use my location';
+function distSet(which, km) {
+  if (which === 'lo') STATE.mind = Math.max(0, Math.min(km, STATE.maxd - 1));
+  else STATE.maxd = Math.max(STATE.mind + 1, Math.min(km, DMAX));
+  distDraw();
   recompute();
 }
 
-function geoError(err) {
-  locBtn.removeAttribute('aria-busy');
-  locBtn.textContent = 'Use my location';
-  accOut.textContent =
-    err.code === err.PERMISSION_DENIED
-      ? (window.isSecureContext
-          ? 'permission denied'
-          : 'needs https — run: python serve.py 8011 0.0.0.0 --tls')
-      : err.code === err.POSITION_UNAVAILABLE ? 'position unavailable'
-      : err.code === err.TIMEOUT ? 'timed out — try again outdoors'
-      : 'geolocation failed';
-}
+(function () {
+  let drag = null;
+  const tAt = clientX => {
+    const r = dual.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+  };
+  dual.addEventListener('pointerdown', e => {
+    const t = tAt(e.clientX);
+    // grab whichever thumb is nearer, so a tap on the track moves the sensible one
+    drag = Math.abs(t - km2t(STATE.mind)) <= Math.abs(t - km2t(STATE.maxd)) ? 'lo' : 'hi';
+    dual.setPointerCapture(e.pointerId);
+    distSet(drag, t2km(t));
+    e.preventDefault();
+  });
+  dual.addEventListener('pointermove', e => { if (drag) distSet(drag, t2km(tAt(e.clientX))); });
+  const stop = () => { drag = null; };
+  dual.addEventListener('pointerup', stop);
+  dual.addEventListener('pointercancel', stop);
 
-if (!('geolocation' in navigator)) {
-  locBtn.disabled = true;
-  accOut.textContent = 'not supported';
-} else {
-  locBtn.onclick = () => {
-    if (watchId != null) {                 // second press stops following
-      navigator.geolocation.clearWatch(watchId);
-      watchId = null;
-      locBtn.classList.remove('on');
-      locBtn.textContent = 'Use my location';
-      return;
-    }
-    if (!window.isSecureContext) {
-      accOut.textContent = 'needs https — run: python serve.py 8011 0.0.0.0 --tls';
-      return;
-    }
-    locBtn.setAttribute('aria-busy', 'true');
-    locBtn.textContent = 'Locating…';
-    const opts = { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 };
-    navigator.geolocation.getCurrentPosition(gotPosition, geoError, opts);
-  };
-  /* Long-press, or double-click on a desktop, to keep following. Useful while
-     walking to the spot; pointless once you are standing on it. */
-  locBtn.ondblclick = () => {
-    if (watchId != null || !window.isSecureContext) return;
-    watchId = navigator.geolocation.watchPosition(gotPosition, geoError,
-      { enableHighAccuracy: true, timeout: 20000, maximumAge: 2000 });
-    locBtn.classList.add('on');
-    locBtn.textContent = 'Following…';
-  };
-}
+  for (const [el, which] of [[dlo, 'lo'], [dhi, 'hi']]) {
+    el.addEventListener('keydown', e => {
+      const step = e.shiftKey ? 10 : 1;
+      const cur = which === 'lo' ? STATE.mind : STATE.maxd;
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowDown') distSet(which, cur - step);
+      else if (e.key === 'ArrowRight' || e.key === 'ArrowUp') distSet(which, cur + step);
+      else return;
+      e.preventDefault();
+    });
+  }
+})();
+distDraw();
 
 function syncInputs() {
   document.getElementById('olat').value = STATE.lat.toFixed(5);
