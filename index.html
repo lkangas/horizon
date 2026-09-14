@@ -158,16 +158,6 @@
     cursor: ew-resize;
   }
   #map { flex: 1; min-width: 0; position: relative; }
-  .maplibregl-popup-content {
-    font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-    padding: 10px 12px; border-radius: 5px;
-  }
-  .pop-name { font-weight: 600; margin-bottom: 6px; }
-  .pop table { border-collapse: collapse; }
-  .pop td { padding: 1px 0; }
-  .pop td:first-child { color: var(--dim); padding-right: 12px; }
-  .pop td:last-child { font-variant-numeric: tabular-nums; text-align: right; }
-  .pop .datum { color: var(--dim); font-size: 11px; margin-top: 6px; }
   #loading {
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     background: var(--bg); color: var(--dim); font-size: 13px; z-index: 5;
@@ -734,27 +724,43 @@ function updateCount() {
 function select(o, fly) {
   if (!o) return;
   STATE.sel = o.i;
-  paint(); renderList(); drawPano();
-  const g = inverse(STATE.lat, STATE.lon, o.lat, o.lon);
-  new maplibregl.Popup({ offset: 10 })
-    .setLngLat([o.lon, o.lat])
-    .setHTML('<div class="pop"><div class="pop-name">' +
-      (o.name ? esc(o.name) : CATLABEL[o.cat]) + '</div><table>' +
-      tr('True azimuth', g.az.toFixed(3) + '&deg;') +
-      tr('Distance', (g.d / 1000).toFixed(2) + ' km') +
-      tr('Top', o.top_m == null ? '–' : fmt(o.top_m) + ' m') +
-      tr('Height', o.height_m == null ? '–' : fmt(o.height_m) + ' m') +
-      tr('Ground', o.ground_m == null ? '–' : fmt(o.ground_m) + ' m') +
-      tr('Apparent elev.', o.alt == null ? '–' : (o.alt >= 0 ? '+' : '') + o.alt.toFixed(3) + '&deg;') +
-      tr('Angular height', o.ang == null ? '–' : o.ang.toFixed(3) + '&deg;') +
-      '</table><div class="datum">elevations N2000 &middot; source ' + esc(o.srcs) +
-      (o.src_h ? ', height ' + esc(o.src_h) : '') + '</div></div>')
-    .addTo(map);
   PANO.ctr = o.az;
-  syncRay(); drawPano();
+  /* No map popup. It is anchored to the object, so it lands wherever you were
+     looking and covers most of the map to say what the strip can say in a
+     line. The readout is drawn into the horizon strip instead. */
+  paint(); renderList(); drawPano();
   if (fly) map.flyTo({ center: [o.lon, o.lat], speed: 1.2 });
 }
-const tr = (k, v) => '<tr><td>' + k + '</td><td>' + v + '</td></tr>';
+
+/* Compact detail for the selected object, drawn inside the strip. */
+function drawReadout(d, w, h, RULER) {
+  const o = view.find(x => x.i === STATE.sel);
+  if (!o) return;
+  const l1 = (o.name || CATLABEL[o.cat]);
+  const l2 = 'az ' + o.az.toFixed(2) + '°   ' + (o.dist / 1000).toFixed(1) + ' km   top '
+    + (o.top_m == null ? '–' : Math.round(o.top_m) + ' m')
+    + (o.height_m == null ? '' : '   h ' + Math.round(o.height_m) + ' m')
+    + '   alt ' + (o.alt >= 0 ? '+' : '') + o.alt.toFixed(2) + '°';
+  d.font = '600 12px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  const w1 = d.measureText(l1).width;
+  d.font = '11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  const w2 = d.measureText(l2).width;
+  const bw = Math.max(w1, w2) + 16, bh = 36, x0 = 6, y0 = RULER + 6;
+  d.fillStyle = 'rgba(255,254,251,0.93)';
+  d.fillRect(x0, y0, bw, bh);
+  d.strokeStyle = '#b4531d';
+  d.lineWidth = 1;
+  d.strokeRect(x0 + 0.5, y0 + 0.5, bw - 1, bh - 1);
+  d.textAlign = 'left';
+  d.textBaseline = 'alphabetic';
+  d.fillStyle = '#b4531d';
+  d.font = '600 12px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  d.fillText(l1, x0 + 8, y0 + 15);
+  d.fillStyle = '#2b2723';
+  d.font = '11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  d.fillText(l2, x0 + 8, y0 + 29);
+}
+
 
 /* ------------------------------------------------------------------ *
  * Controls.
@@ -1024,6 +1030,13 @@ function drawPano() {
     cx2.fillText(card || String(az), x, RULER / 2 - 1);
   }
 
+  /* The map's wedge is redrawn here rather than at each call site. Keeping
+     them separate meant every new way of changing the window had to remember
+     to call both, and the wheel handler did not -- so zooming the strip left
+     the map showing the old sector until something else happened to sync it. */
+  syncRay();
+  drawReadout(cx2, w, h, RULER);
+
   /* the azimuth under the pointer, for reading a bearing straight off */
   if (PANO.hover != null) {
     const x = X(PANO.hover);
@@ -1059,7 +1072,6 @@ function drawPano() {
       const d = (e.clientX - drag.x) / r.width * PANO.span;
       drag.moved = Math.max(drag.moved, Math.abs(e.clientX - drag.x));
       PANO.ctr = (drag.ctr - d + 720) % 360;
-      syncRay();
     }
     drawPano();
   });
@@ -1108,7 +1120,7 @@ function drawPano() {
       if (d > 10) {
         PANO.span = Math.max(5, Math.min(360, pinch0.span * pinch0.d / d));
         PANO.spanAuto = false;
-        syncRay(); drawPano();
+        drawPano();
       }
     }
   });
@@ -1167,7 +1179,7 @@ document.getElementById('scrim').onclick = () => setMenu(false);
 window.addEventListener('keydown', e => { if (e.key === 'Escape') setMenu(false); });
 window.addEventListener('resize', () => {
   if (!NARROW()) setMenu(false);
-  if (PANO.spanAuto) { PANO.span = NARROW() ? 45 : 120; syncRay(); drawPano(); }
+  if (PANO.spanAuto) { PANO.span = NARROW() ? 45 : 120; drawPano(); }
 });
 
 /* resizer */
