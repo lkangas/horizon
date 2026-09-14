@@ -391,7 +391,10 @@ def apply_focal_heights(objs):
     """
     n = 0
     for o in objs:
-        if o.get("src_pos") != "vayla" or o.get("height_m") is not None:
+        # vayla_id, not src_pos: a sea mark that merged into an OSM lighthouse
+        # keeps the register's fields but the merged object's src_pos is the
+        # base's. build.py's CARRY is what brings them across.
+        if o.get("vayla_id") is None or o.get("height_m") is not None:
             continue
         h = o.get("focal_agl_m") or o.get("daymark_agl_m")
         basis = "agl"

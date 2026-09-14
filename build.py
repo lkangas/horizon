@@ -2,6 +2,7 @@
 """Build objects.json: Finland's horizon-recognisable structures, with N2000 tops.
 
     python build.py fetch          # populate the cache (resumable)
+    python build.py fetch vayla    # just the sea marks
     python build.py build          # cache -> objects.json
     python build.py ndsm           # heights for what has none, then build again
     python build.py stats          # what is in the cache
@@ -35,6 +36,8 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections import Counter, defaultdict
+
+import vayla
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "objects.json")
@@ -785,10 +788,15 @@ COMPATIBLE = {
     "chimney": {"chimney"},
     "turbine": {"turbine"},
     "watertower": {"watertower"},
-    "obstower": {"obstower", "building"},
+    "obstower": {"obstower", "building", "lighthouse"},
     "belltower": {"belltower"},
-    "lighthouse": {"lighthouse"},
-    "building": {"building", "obstower"},
+    # A daymark beacon is a tower that OSM does not always tag as a lighthouse.
+    # Of the 56 sea marks whose nearest catalogue object is under 40 m away, 44
+    # are already cat=lighthouse but 5 are obstower and 3 are building -- the
+    # Ulkokrunni and Hogsten stone pookis among them. Without these two the
+    # build would carry them twice, a metre apart.
+    "lighthouse": {"lighthouse", "obstower", "building"},
+    "building": {"building", "obstower", "lighthouse"},
 }
 
 
@@ -802,11 +810,26 @@ def height_ok(a, b):
     return abs(ha - hb) <= max(10.0, 0.15 * max(ha, hb))
 
 
-_RANK = {"mtk": 3, "aip": 3, "osm": 1, None: 0}
+# A focal plane is a real measurement but it is the height of the LIGHT, not
+# of the tower, so it sits above OSM's guesses and below anything that set out
+# to measure the top.
+_RANK = {"mtk": 3, "aip": 3, "vayla": 2, "osm": 1, None: 0}
+
+
+# Fields that exist in one source and have no equivalent in the others. They
+# have to survive a merge: when a sea mark folds into an OSM lighthouse the
+# base object is the OSM one, and without this its published focal plane and
+# daymark top are simply dropped -- which is how Bogskar's 22 m tower came out
+# of the build with no height at all while the register held one.
+CARRY = ("focal_m", "focal_agl_m", "daymark_agl_m",
+         "vayla_type", "vayla_id", "in_service", "owner")
 
 
 def absorb(base, other):
     """Fold `other` into `base`, preferring the more trustworthy attribute."""
+    for k in CARRY:
+        if base.get(k) is None and other.get(k) is not None:
+            base[k] = other[k]
     if other.get("height_m") is not None:
         if (base.get("height_m") is None
                 or _RANK[other.get("src_h")] > _RANK[base.get("src_h")]):
@@ -1123,8 +1146,9 @@ def build():
         with open(raw("mtk.json"), encoding="utf-8") as f:
             mtk = json.load(f)
     aip, osm, bld = load_aip(), load_osm(), load_buildings()
-    print("  mtk %5d   aip %5d   osm %5d   buildings %5d"
-          % (len(mtk), len(aip), len(osm), len(bld)))
+    vay = vayla.load_vayla(raw(vayla.CACHE_NAME))
+    print("  mtk %5d   aip %5d   osm %5d   buildings %5d   vayla %5d"
+          % (len(mtk), len(aip), len(osm), len(bld), len(vay)))
 
     # 150 m for the register: where MTK holds the same object the median
     # offset is 1 m, and the masts MTK genuinely lacks have their nearest MTK
@@ -1136,8 +1160,17 @@ def build():
     # Buildings merge only into other buildings and towers (COMPATIBLE), and at
     # a tighter radius: city blocks put distinct towers 40 m apart.
     objs = merge(objs, bld, radius=30.0)
+    # 70 m for the sea marks. Where both registers hold the same structure they
+    # agree to under 2 m -- OSM's coastal lighthouses are largely traced from
+    # this same source -- and the band from 40 to 70 m holds six more true
+    # pairs. Past 105 m the matches turn into genuine neighbours: Asko's
+    # nearest is Koklubb, 134 m off and a different mark.
+    objs = merge(objs, vay, radius=70.0)
     print('  heights from the surface model: %d' % apply_ndsm(objs))
     print('  filled ground from the 100 m model: %d' % sample_dem(objs))
+    # After sample_dem, because the last-resort branch needs to know the
+    # structure stands at the waterline. Never overwrites a measured height.
+    print('  heights from the light register: %d' % vayla.apply_focal_heights(objs))
 
     for o in objs:
         if o.get("ground_m") is not None and o.get("height_m") is not None:
@@ -1153,6 +1186,7 @@ def build():
             "Contains data from the National Land Survey of Finland "
             "Topographic Database 04/2025, CC BY 4.0",
             "Contains aviation obstacle data from Traficom / Fintraffic AIS Finland",
+            "Contains data from the Väylävirasto safety-equipment register (Digiroad / Vesiväylät), CC BY 4.0",
             "© OpenStreetMap contributors, ODbL",
         ],
         "n": len(objs),
@@ -1188,7 +1222,7 @@ def main():
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
     print("cache: %s" % CACHE)
     if cmd == "fetch":
-        which = sys.argv[2:] or ["mtk", "aip", "osm", "buildings", "dem"]
+        which = sys.argv[2:] or ["mtk", "aip", "osm", "buildings", "dem", "vayla"]
         if "mtk" in which:
             fetch_mtk()
         if "aip" in which:
@@ -1199,6 +1233,8 @@ def main():
             fetch_dem()
         if "buildings" in which:
             fetch_buildings()
+        if "vayla" in which:
+            vayla.fetch_vayla(raw(vayla.CACHE_NAME))
     elif cmd == "build":
         build()
     elif cmd == "ndsm":
