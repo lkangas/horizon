@@ -1000,8 +1000,15 @@ slider, and a height-confidence toggle (registered / lidar / estimated) exposing
 1. A saved viewpoint. The ~1,200 MTK `nakotorni`, the fells, and whatever the user pins. This is the
    common case: you go back to the same tower.
 2. A map pin, dragged. Exact, and the only option on desktop.
-3. `navigator.geolocation`, as a starting guess to be nudged. Note `coords.accuracy` is a 95%
-   radius, not 1σ — halve it before putting it in an error budget.
+3. `navigator.geolocation`, as a starting guess to be nudged — the usual case on a phone, where
+   typing coordinates is miserable. `coords.accuracy` is a **95% radius, not 1σ**, so halve it
+   before putting it in an error budget; the page reports it as the range inside which the fix is
+   the dominant error, since position error is an angle divided by distance (10 m is 0.57° at 1 km
+   and 0.01° at 50 km). A second press follows continuously, which is worth it while walking to a
+   spot and pointless once standing on one.
+
+   It never reads `coords.altitude` — see §4.3, the two platforms disagree by the geoid separation.
+   Eye height stays a typed number.
 
 **Height** is the most sensitive input — 1 m of error moves every elevation and shifts the grazing
 horizon (from 2 m the range to a 40 m tower is 29.6 km; from 3 m, 31.8 km). Snap to the DEM at the
@@ -1045,9 +1052,11 @@ Range support is mandatory and not universal:
 `pmtiles.js` throws rather than degrading when a 200 body exceeds the requested range — the same
 trap espoo's README documents for `python -m http.server`.
 
-HTTPS is needed for `navigator.geolocation` and for the page to be installable, so on-device testing
-over the plain-HTTP `serve.py` needs a TLS tunnel or a local certificate. Nothing else about the
-page requires a secure context.
+**Geolocation requires a secure context**, so over plain `http://192.168.x.x` a phone refuses to
+give a position at all — localhost is exempt, which is why the desktop works without this.
+`serve.py --tls` generates a self-signed certificate covering the machine's LAN address and serves
+HTTPS; the phone warns once. The certificate and key go to `AZIMUTH_CACHE`, never the repo.
+Nothing else about the page requires a secure context.
 
 ## 7. Visual design
 

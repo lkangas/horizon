@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Static file server with HTTP Range support and a second root for bulk data.
 
-    python serve.py [port]        # default 8000
+    python serve.py [port] [host]      # default 8000 127.0.0.1
+    python serve.py 8011 0.0.0.0 --tls # HTTPS, for testing on a phone
 
 Two reasons this is not `python -m http.server`.
 
@@ -20,11 +21,19 @@ back into the folder this arrangement exists to keep empty.
 
 A plain file:// open will not work either -- the page fetches objects.json,
 which browsers block from the filesystem.
+
+--tls exists for one reason: navigator.geolocation requires a secure context,
+so over plain http://192.168.x.x the phone refuses to give a position at all.
+localhost is exempt, which is why the desktop works without this. The cert is
+self-signed, so the phone will warn once and needs "visit anyway"; it is
+written into AZIMUTH_CACHE, never into the repo, because it is a private key.
 """
 
 import http.server
 import os
 import re
+import socket
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -138,12 +147,68 @@ class Server(http.server.ThreadingHTTPServer):
     daemon_threads = True
 
 
+def lan_ip():
+    """The address a phone on the same network can reach. Connecting a UDP
+    socket assigns a local address without sending anything."""
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def ensure_cert(ip):
+    """Self-signed cert covering this machine's LAN IP, cached alongside the
+    data. Regenerated if the address changed -- a cert for the wrong IP fails
+    in a way that looks like a server fault."""
+    cert = os.path.join(CACHE, "devcert.pem")
+    key = os.path.join(CACHE, "devkey.pem")
+    stamp = os.path.join(CACHE, "devcert.ip")
+    have = os.path.exists(cert) and os.path.exists(key)
+    same = have and os.path.exists(stamp) and open(stamp).read().strip() == ip
+    if not same:
+        print("generating a self-signed certificate for %s ..." % ip)
+        try:
+            subprocess.run([
+                "openssl", "req", "-x509", "-newkey", "rsa:2048",
+                "-keyout", key, "-out", cert, "-days", "825", "-nodes",
+                "-subj", "/CN=azimuth-dev",
+                "-addext", "subjectAltName=IP:%s,IP:127.0.0.1,DNS:localhost" % ip,
+            ], check=True, capture_output=True)
+        except (OSError, subprocess.CalledProcessError) as e:
+            detail = getattr(e, "stderr", b"") or b""
+            sys.exit("could not generate a certificate with openssl (%s).\n%s"
+                     % (e, detail.decode("utf-8", "replace")[:400]))
+        with open(stamp, "w") as fh:
+            fh.write(ip)
+    return cert, key
+
+
 if __name__ == "__main__":
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    tls = "--tls" in sys.argv
+    port = int(args[0]) if args else 8000
     # Loopback by default. Pass a host to expose it -- "0.0.0.0" to reach the
     # page from a phone on the same network.
-    host = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1"
+    host = args[1] if len(args) > 1 else ("0.0.0.0" if tls else "127.0.0.1")
     os.chdir(HERE)
-    print("serving %s on http://%s:%d" % (HERE, host, port))
+
+    srv = Server((host, port), Handler)
+    scheme = "http"
+    if tls:
+        import ssl
+        ip = lan_ip()
+        cert, key = ensure_cert(ip)
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+        scheme = "https"
+        print("on the phone, open:  https://%s:%d" % (ip, port))
+        print("  the certificate is self-signed, so accept the warning once")
+        print("  (geolocation needs a secure context; plain http will refuse)")
+    print("serving %s on %s://%s:%d" % (HERE, scheme, host, port))
     print("  /terrain/ and /basemap.pmtiles from %s" % CACHE)
-    Server((host, port), Handler).serve_forever()
+    srv.serve_forever()
