@@ -745,20 +745,26 @@ function select(o, fly) {
   if (fly) map.flyTo({ center: [o.lon, o.lat], speed: 1.2 });
 }
 
-/* Compact detail for the selected object, drawn inside the strip. */
+/* Compact detail for the selected object, drawn inside the strip.
+   Right-hand side: the elevation scale is labelled down the left edge, and a
+   plate there covers exactly the numbers you are reading the object against. */
 function drawReadout(d, w, h, RULER) {
   const o = view.find(x => x.i === STATE.sel);
   if (!o) return;
-  const l1 = (o.name || CATLABEL[o.cat]);
-  const l2 = 'az ' + o.az.toFixed(2) + '°   ' + (o.dist / 1000).toFixed(1) + ' km   top '
-    + (o.top_m == null ? '–' : Math.round(o.top_m) + ' m')
-    + (o.height_m == null ? '' : '   h ' + Math.round(o.height_m) + ' m')
-    + '   alt ' + (o.alt >= 0 ? '+' : '') + o.alt.toFixed(2) + '°';
-  d.font = '600 12px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
-  const w1 = d.measureText(l1).width;
-  d.font = '11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
-  const w2 = d.measureText(l2).width;
-  const bw = Math.max(w1, w2) + 16, bh = 36, x0 = 6, y0 = RULER + 6;
+  const m = v => v == null ? '–' : Math.round(v) + ' m';
+  const lines = [
+    o.name || CATLABEL[o.cat],
+    'az ' + o.az.toFixed(2) + '°   ' + (o.dist / 1000).toFixed(1) + ' km   alt '
+      + (o.alt >= 0 ? '+' : '') + o.alt.toFixed(2) + '°',
+    'top ' + m(o.top_m) + '   gnd ' + m(o.ground_m) + '   h ' + m(o.height_m),
+  ];
+  const F = ['600 12px', '11px', '11px'];
+  const FF = ' -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
+  let bw = 0;
+  lines.forEach((t, i) => { d.font = F[i] + FF; bw = Math.max(bw, d.measureText(t).width); });
+  bw += 14;
+  const bh = 48, x0 = Math.max(4, w - bw - 6), y0 = RULER + 5;
+
   d.fillStyle = 'rgba(255,254,251,0.93)';
   d.fillRect(x0, y0, bw, bh);
   d.strokeStyle = '#b4531d';
@@ -766,14 +772,12 @@ function drawReadout(d, w, h, RULER) {
   d.strokeRect(x0 + 0.5, y0 + 0.5, bw - 1, bh - 1);
   d.textAlign = 'left';
   d.textBaseline = 'alphabetic';
-  d.fillStyle = '#b4531d';
-  d.font = '600 12px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
-  d.fillText(l1, x0 + 8, y0 + 15);
-  d.fillStyle = '#2b2723';
-  d.font = '11px -apple-system, "Segoe UI", Roboto, Arial, sans-serif';
-  d.fillText(l2, x0 + 8, y0 + 29);
+  lines.forEach((t, i) => {
+    d.font = F[i] + FF;
+    d.fillStyle = i === 0 ? '#b4531d' : '#2b2723';
+    d.fillText(t, x0 + 7, y0 + 14 + i * 14);
+  });
 }
-
 
 /* ------------------------------------------------------------------ *
  * Controls.
