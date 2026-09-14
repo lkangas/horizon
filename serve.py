@@ -24,14 +24,23 @@ which browsers block from the filesystem.
 
 --tls exists for one reason: navigator.geolocation requires a secure context,
 so over plain http://192.168.x.x the phone refuses to give a position at all.
-localhost is exempt, which is why the desktop works without this. The cert is
-self-signed, so the phone will warn once and needs "visit anyway"; it is
-written into AZIMUTH_CACHE, never into the repo, because it is a private key.
+localhost is exempt, which is why the desktop works without this.
+
+It prefers a real certificate over a self-signed one. If this machine is on a
+tailnet with HTTPS enabled, `tailscale cert` issues a Let's Encrypt
+certificate for the MagicDNS name and the phone sees no warning at all.
+Otherwise it falls back to a self-signed cert covering the LAN address, which
+works but has to be accepted once.
+
+Either way the certificate and key are written into AZIMUTH_CACHE, never into
+the repo, because one of them is a private key.
 """
 
 import http.server
 import os
 import re
+import json
+import shutil
 import socket
 import subprocess
 import sys
@@ -160,7 +169,39 @@ def lan_ip():
         s.close()
 
 
-def ensure_cert(ip):
+def tailscale_cert():
+    """(cert, key, hostname) from `tailscale cert`, or None.
+
+    Returns a genuine Let's Encrypt certificate for the MagicDNS name, so a
+    phone on the tailnet gets no warning. Only works if the tailnet has HTTPS
+    certificates enabled -- CertDomains in the status tells us before we try.
+    """
+    exe = shutil.which("tailscale") or "C:\\Program Files\\Tailscale\\tailscale.exe"
+    if not os.path.exists(exe) and not shutil.which("tailscale"):
+        return None
+    try:
+        out = subprocess.run([exe, "status", "--json"], check=True,
+                             capture_output=True, timeout=20).stdout
+        st = json.loads(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    fqdn = (st.get("Self") or {}).get("DNSName", "").rstrip(".")
+    if not fqdn or fqdn not in (st.get("CertDomains") or []):
+        return None                       # HTTPS not enabled for this tailnet
+    cert = os.path.join(CACHE, "tscert.pem")
+    key = os.path.join(CACHE, "tskey.pem")
+    try:
+        # Idempotent: tailscale keeps its own cache and only renews when due.
+        subprocess.run([exe, "cert", "--cert-file", cert, "--key-file", key, fqdn],
+                       check=True, capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    short = fqdn.split(".")[0]
+    ips = [a for a in ((st.get("Self") or {}).get("TailscaleIPs") or []) if ":" not in a]
+    return cert, key, fqdn, short, ips
+
+
+def ensure_cert(ip, extra=(), extra_ips=()):
     """Self-signed cert covering this machine's LAN IP, cached alongside the
     data. Regenerated if the address changed -- a cert for the wrong IP fails
     in a way that looks like a server fault."""
@@ -168,7 +209,8 @@ def ensure_cert(ip):
     key = os.path.join(CACHE, "devkey.pem")
     stamp = os.path.join(CACHE, "devcert.ip")
     have = os.path.exists(cert) and os.path.exists(key)
-    same = have and os.path.exists(stamp) and open(stamp).read().strip() == ip
+    want = ",".join([ip] + list(extra) + list(extra_ips))
+    same = have and os.path.exists(stamp) and open(stamp).read().strip() == want
     if not same:
         print("generating a self-signed certificate for %s ..." % ip)
         try:
@@ -176,14 +218,17 @@ def ensure_cert(ip):
                 "openssl", "req", "-x509", "-newkey", "rsa:2048",
                 "-keyout", key, "-out", cert, "-days", "825", "-nodes",
                 "-subj", "/CN=azimuth-dev",
-                "-addext", "subjectAltName=IP:%s,IP:127.0.0.1,DNS:localhost" % ip,
+                "-addext", "subjectAltName=" + ",".join(
+                    ["IP:%s" % ip, "IP:127.0.0.1", "DNS:localhost"]
+                    + ["DNS:%s" % n for n in extra]
+                    + ["IP:%s" % a for a in extra_ips]),
             ], check=True, capture_output=True)
         except (OSError, subprocess.CalledProcessError) as e:
             detail = getattr(e, "stderr", b"") or b""
             sys.exit("could not generate a certificate with openssl (%s).\n%s"
                      % (e, detail.decode("utf-8", "replace")[:400]))
         with open(stamp, "w") as fh:
-            fh.write(ip)
+            fh.write(want)
     return cert, key
 
 
@@ -200,15 +245,47 @@ if __name__ == "__main__":
     scheme = "http"
     if tls:
         import ssl
+        ts = tailscale_cert()
         ip = lan_ip()
-        cert, key = ensure_cert(ip)
+
+        # Two certificates, chosen per connection by SNI.
+        #
+        # Let's Encrypt will only issue for the public MagicDNS FQDN, so the
+        # short name and the bare IPs cannot be on that certificate. Rather
+        # than make you pick one, the default context is a self-signed cert
+        # covering the short name and every address, and the SNI callback
+        # swaps in the real certificate when the client actually asks for the
+        # FQDN. A client connecting by IP sends no SNI and lands on the
+        # default, which is exactly what it needs.
+        names = [socket.gethostname().lower()]
+        extra_ips = []
+        if ts:
+            _, _, fqdn, short, tips = ts
+            names = sorted({short, fqdn, socket.gethostname().lower()})
+            extra_ips = tips
+        cert, key = ensure_cert(ip, extra=names, extra_ips=extra_ips)
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ctx.load_cert_chain(cert, key)
+
+        if ts:
+            ts_cert, ts_key, fqdn, short, _ = ts
+            ts_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            ts_ctx.load_cert_chain(ts_cert, ts_key)
+
+            def pick(sock, server_name, _ctx, _fqdn=fqdn, _ts=ts_ctx):
+                if server_name and server_name.lower() == _fqdn:
+                    sock.context = _ts
+            ctx.sni_callback = pick
+            print("on the phone, open either:")
+            print("    https://%s:%d      <- Let's Encrypt, no warning" % (fqdn, port))
+            print("    https://%s:%d                      <- self-signed, accept once"
+                  % (short, port))
+        else:
+            print("on the phone, open:  https://%s:%d" % (ip, port))
+            print("  the certificate is self-signed, so accept the warning once")
+        print("  (geolocation needs a secure context; plain http will refuse)")
         srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
         scheme = "https"
-        print("on the phone, open:  https://%s:%d" % (ip, port))
-        print("  the certificate is self-signed, so accept the warning once")
-        print("  (geolocation needs a secure context; plain http will refuse)")
     print("serving %s on %s://%s:%d" % (HERE, scheme, host, port))
     print("  /terrain/ and /basemap.pmtiles from %s" % CACHE)
     srv.serve_forever()
