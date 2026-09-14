@@ -1046,24 +1046,29 @@ function drawPano() {
   const vis = view.filter(o => o.alt != null && Math.abs(dAz(o.az, PANO.ctr)) < half + 1);
   vis.sort((a, b) => a.dist - b.dist);                 // far behind near
 
-  /* Each object is split at the horizon line. The part above it stands
-     against the sky and is what you actually match against a skyline; the part
-     below is seen against the ground, so it is drawn dotted and faint rather
-     than either omitted or given equal weight. An object whose top falls below
-     the line is against the ground along its whole length and is filtered out
-     upstream, not drawn dim. */
+  /* What is dotted is what the EARTH hides, which is a question of distance,
+     not of elevation angle.
+
+     An object nearer than the horizon distance is wholly in front of the
+     bulge: you see it top to bottom, however far below eye level it sits, so
+     it is drawn solid all the way down. An object beyond the horizon distance
+     has its lower part cut off by the bulge, and that hidden part -- from the
+     grazing line at -dip down to where its base would otherwise appear -- is
+     the dotted, faint one. */
+  const dHorizon = Math.sqrt(2 * REFF * Math.max(0.5, STATE.eye));
   for (const o of vis) {
     const x = X(o.az);
     const yt = Math.max(Y(o.alt), RULER);
     const yb = Math.min(Y(o.altBase != null ? o.altBase : 0), h);
-    const ySplit = Math.min(Math.max(yD, yt), yb);
+    const behind = o.dist > dHorizon;
+    const ySplit = behind ? Math.min(Math.max(yD, yt), yb) : yb;
     const col = distColor(o.dist / 1000);
     const selected = o.i === STATE.sel;
 
-    if (yb > ySplit) {                       // below the horizon: against ground
+    if (behind && yb > ySplit) {             // hidden below the Earth's bulge
       cx2.save();
       cx2.strokeStyle = col;
-      cx2.globalAlpha = selected ? 0.5 : 0.28;
+      cx2.globalAlpha = selected ? 0.45 : 0.22;
       cx2.lineWidth = selected ? 2.5 : 1.4;
       cx2.setLineDash([2, 3]);
       cx2.beginPath();
